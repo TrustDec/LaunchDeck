@@ -75,6 +75,17 @@ struct LaunchItem: Identifiable, Hashable, Sendable {
             children: children
         )
     }
+
+    func updatingTitle(_ title: String) -> LaunchItem {
+        LaunchItem(
+            id: id,
+            title: title,
+            subtitle: subtitle,
+            kind: kind,
+            bundleURL: bundleURL,
+            children: children
+        )
+    }
 }
 
 extension LaunchItem {
