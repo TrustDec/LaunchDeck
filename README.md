@@ -4,6 +4,8 @@ LaunchDeck is a native macOS launcher built for people who miss the classic Laun
 
 It brings back the feeling of opening all your apps in one focused, fullscreen space: clean pages, large icons, folders, search, and fast app launching. The goal is simple: make browsing and opening apps on modern macOS feel smooth, visual, and enjoyable again.
 
+![](./assets/desktop.png)
+
 ## Why LaunchDeck
 
 Apple moved away from the old Launchpad experience. If you preferred the original full-screen app grid, quick paging, and folder-based organization, LaunchDeck is designed to bring that workflow back.
