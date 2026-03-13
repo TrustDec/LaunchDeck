@@ -730,7 +730,7 @@ private struct LaunchpadFallbackPagerView: View {
 
                 FallbackPagerInputMonitor(onPageDelta: onPageDelta)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(true)
+                    .allowsHitTesting(false)
             }
             .onAppear {
                 LaunchDeckDiagnostics.log("fallback pager appeared currentPage=\(currentPage) pageCount=\(pages.count)")
@@ -763,10 +763,15 @@ final class FallbackPagerInputView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        postsFrameChangedNotifications = false
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
         nil
     }
 
@@ -1004,7 +1009,7 @@ private struct TileIconView: View {
                     .fill(Color.black.opacity(0.28))
                     .frame(width: folderIconSize, height: folderIconSize)
 
-                FolderPreviewView(children: Array(item.children.prefix(4)), miniIconSize: miniIconSize, shouldLoadIcons: false)
+                FolderPreviewView(children: Array(item.children.prefix(4)), miniIconSize: miniIconSize, shouldLoadIcons: shouldLoadIcons)
             } else if let icon {
                 AppIconImageView(image: icon)
                     .frame(width: iconSize, height: iconSize)
