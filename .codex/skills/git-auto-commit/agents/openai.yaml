@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Auto Commit"
+  short_description: "Summarize changes and create a Git commit"
+  default_prompt: "Inspect the current repository, summarize uncommitted changes, stage the right files, and create a clear git commit."
