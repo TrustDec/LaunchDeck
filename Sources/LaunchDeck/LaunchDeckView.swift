@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct LaunchDeckView: View {
     @ObservedObject var store: LaunchDeckStore
     @StateObject private var interactionEngine = LaunchpadInteractionEngine()
+    @Environment(\.colorScheme) private var colorScheme
     @Namespace private var glassNamespace
     @State private var layout = LaunchpadLayout.default
     @State private var sceneOpacity = 0.0
@@ -19,7 +20,7 @@ struct LaunchDeckView: View {
         GeometryReader { proxy in
             ZStack {
                 background(shouldLoadWallpaper: shouldLoadBackdrop)
-                Color.black.opacity(0.34).ignoresSafeArea()
+                sceneScrim.ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     topBar
@@ -46,7 +47,7 @@ struct LaunchDeckView: View {
                 if store.isLoading {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(.white)
+                        .tint(Color(nsColor: .controlAccentColor))
                 }
 
                 if let folder = interactionEngine.displayedFolder {
@@ -121,7 +122,7 @@ struct LaunchDeckView: View {
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color(nsColor: .labelColor))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .background {
@@ -139,7 +140,7 @@ struct LaunchDeckView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
                         .frame(width: 34, height: 34)
                         .background {
                             NativeGlassSurface(
@@ -156,19 +157,26 @@ struct LaunchDeckView: View {
     }
 
     private func background(shouldLoadWallpaper: Bool) -> some View {
-        DesktopBackdropView(shouldLoadWallpaper: shouldLoadWallpaper)
+        DesktopBackdropView(
+            shouldLoadWallpaper: shouldLoadWallpaper,
+            colorScheme: colorScheme
+        )
             .overlay(
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(0.08),
+                        Color(nsColor: .windowBackgroundColor).opacity(colorScheme == .dark ? 0.08 : 0.18),
                         .clear,
-                        Color.black.opacity(0.22),
+                        Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
             )
             .ignoresSafeArea()
+    }
+
+    private var sceneScrim: Color {
+        Color.black.opacity(colorScheme == .dark ? 0.34 : 0.14)
     }
 
     private var launchSurfacePlaceholder: some View {
@@ -190,12 +198,12 @@ struct LaunchDeckView: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
 
                 TextField("Search", text: $store.query)
                     .textFieldStyle(.plain)
                     .font(.system(size: layout.searchFontSize, weight: .medium))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color(nsColor: .labelColor))
                     .padding(.vertical, 1)
 
                 if !store.query.isEmpty {
@@ -203,7 +211,7 @@ struct LaunchDeckView: View {
                         store.query = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.white.opacity(0.5))
+                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
                     }
                     .buttonStyle(.plain)
                 }
@@ -310,11 +318,11 @@ struct LaunchDeckView: View {
             if let lastError = store.lastError {
                 Text(lastError)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color(red: 1.0, green: 0.82, blue: 0.82))
+                    .foregroundStyle(Color(nsColor: .systemRed))
             } else if store.isEditing {
                 Text("Drag to reorder. Drop on an app to create a folder.")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             }
 
             HStack(spacing: 10) {
@@ -324,13 +332,13 @@ struct LaunchDeckView: View {
                         withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
                             store.selectPage(page)
                         }
-                    } label: {
-                        Circle()
-                            .fill(.white.opacity(metrics.opacity))
-                            .frame(
-                                width: metrics.width,
-                                height: metrics.width
-                            )
+                        } label: {
+                            Circle()
+                                .fill(Color(nsColor: .labelColor).opacity(metrics.opacity))
+                                .frame(
+                                    width: metrics.width,
+                                    height: metrics.width
+                                )
                             .scaleEffect(metrics.scale)
                     }
                     .buttonStyle(.plain)
@@ -360,7 +368,7 @@ struct LaunchDeckView: View {
         let backgroundOpacity = 0.2 * progress
 
         return ZStack {
-            Color.black.opacity(backgroundOpacity * 0.8)
+            Color.black.opacity(backgroundOpacity * (colorScheme == .dark ? 0.8 : 0.35))
                 .ignoresSafeArea()
                 .onTapGesture {
                     requestCloseFolder()
@@ -372,7 +380,7 @@ struct LaunchDeckView: View {
                 if !folder.title.isEmpty {
                     Text(folder.title)
                         .font(.system(size: layout.folderTitleSize, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.94))
+                        .foregroundStyle(Color(nsColor: .labelColor))
                 }
 
                 LazyVGrid(
@@ -394,7 +402,7 @@ struct LaunchDeckView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
                         .frame(width: 24, height: 24)
                         .background {
                             NativeGlassSurface(
@@ -629,15 +637,13 @@ private struct LaunchpadLayout: Equatable {
 
 private struct DesktopBackdropView: View {
     let shouldLoadWallpaper: Bool
+    let colorScheme: ColorScheme
     @State private var wallpaper: NSImage?
 
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [
-                    Color(red: 0.16, green: 0.2, blue: 0.28),
-                    Color(red: 0.09, green: 0.11, blue: 0.16),
-                ],
+                colors: gradientColors,
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -648,12 +654,12 @@ private struct DesktopBackdropView: View {
                     .scaledToFill()
                     .blur(radius: 18)
                     .saturation(1.08)
-                    .overlay(Color.black.opacity(0.14))
+                    .overlay(Color.black.opacity(colorScheme == .dark ? 0.14 : 0.04))
                     .transition(.opacity)
             } else {
                 RadialGradient(
                     colors: [
-                        Color(red: 0.32, green: 0.5, blue: 0.82).opacity(0.45),
+                        Color(nsColor: .controlAccentColor).opacity(colorScheme == .dark ? 0.42 : 0.18),
                         Color.clear,
                     ],
                     center: .topLeading,
@@ -672,6 +678,20 @@ private struct DesktopBackdropView: View {
             wallpaper = await DesktopWallpaperLoader.loadAsync()
             LaunchDeckDiagnostics.log("finish wallpaper load success=\(wallpaper != nil)")
         }
+    }
+
+    private var gradientColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color(red: 0.16, green: 0.2, blue: 0.28),
+                Color(red: 0.09, green: 0.11, blue: 0.16),
+            ]
+        }
+
+        return [
+            Color(nsColor: .windowBackgroundColor),
+            Color(nsColor: .underPageBackgroundColor),
+        ]
     }
 }
 
@@ -736,7 +756,7 @@ private struct LaunchpadPageView: View {
             if items.isEmpty {
                 Text("No Results")
                     .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             } else {
                 LazyVGrid(columns: gridColumns, alignment: .center, spacing: layout.verticalSpacing) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
@@ -948,10 +968,9 @@ private struct LaunchpadItemButton: View {
 
                 Text(item.title)
                     .font(.system(size: layout.iconLabelWidth < 100 ? 12 : 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .lineLimit(1)
                     .multilineTextAlignment(.center)
-                    .shadow(color: .black.opacity(0.34), radius: 6, y: 3)
                     .frame(width: layout.iconLabelWidth)
             }
             .frame(width: layout.iconWidth, height: layout.iconHeight, alignment: .top)
@@ -962,11 +981,11 @@ private struct LaunchpadItemButton: View {
             .overlay(alignment: .topTrailing) {
                 if isEditing {
                     Circle()
-                        .fill(Color.white.opacity(0.2))
+                        .fill(Color(nsColor: .quaternaryLabelColor))
                         .frame(width: 18, height: 18)
                         .overlay(
                             Circle()
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                         )
                         .padding(.trailing, 8)
                 }
@@ -1051,8 +1070,8 @@ private struct FolderItemButton: View {
 
                 Text(item.title)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .lineLimit(1)
                     .multilineTextAlignment(.center)
                     .frame(width: 98)
             }
@@ -1092,12 +1111,12 @@ private struct TileIconView: View {
                     .shadow(color: .black.opacity(0.16), radius: 8, y: 4)
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white.opacity(0.12))
+                    .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
                     .frame(width: iconSize, height: iconSize)
 
                 Image(systemName: "app.fill")
                     .font(.system(size: iconSize * 0.42, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.74))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             }
         }
         .frame(width: max(folderIconSize, iconSize), height: max(folderIconSize, iconSize))
