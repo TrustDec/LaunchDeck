@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct LaunchDeckView: View {
     @ObservedObject var store: LaunchDeckStore
     @StateObject private var interactionEngine = LaunchpadInteractionEngine()
+    @Namespace private var glassNamespace
     @State private var layout = LaunchpadLayout.default
     @State private var sceneOpacity = 0.0
     @State private var sceneScale = 0.985
@@ -123,11 +124,14 @@ struct LaunchDeckView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(.white.opacity(0.12), in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                    )
+                    .background {
+                        NativeGlassSurface(
+                            cornerRadius: 18,
+                            style: .regular
+                        )
+                    }
+                    .clipShape(Capsule())
+                    .launchDeckGlassIdentity("done-button", namespace: glassNamespace)
                 }
 
                 Button {
@@ -137,13 +141,16 @@ struct LaunchDeckView: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.white.opacity(0.9))
                         .frame(width: 34, height: 34)
-                        .background(.white.opacity(0.12), in: Circle())
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                        )
+                        .background {
+                            NativeGlassSurface(
+                                cornerRadius: 17,
+                                style: .regular
+                            )
+                        }
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .launchDeckGlassIdentity("close-button", namespace: glassNamespace)
             }
         }
     }
@@ -166,11 +173,14 @@ struct LaunchDeckView: View {
 
     private var launchSurfacePlaceholder: some View {
         RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .fill(Color.white.opacity(0.03))
-            .overlay(
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
-            )
+            .fill(.clear)
+            .background {
+                NativeGlassSurface(
+                    cornerRadius: 28,
+                    style: .regular
+                )
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
             .frame(width: layout.contentWidth, height: layout.contentHeight)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -186,6 +196,7 @@ struct LaunchDeckView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: layout.searchFontSize, weight: .medium))
                     .foregroundStyle(.white)
+                    .padding(.vertical, 1)
 
                 if !store.query.isEmpty {
                     Button {
@@ -198,13 +209,16 @@ struct LaunchDeckView: View {
                 }
             }
             .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            .padding(.vertical, 13)
             .frame(width: layout.searchWidth)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(Color.white.opacity(0.13), lineWidth: 1)
-            )
+            .background {
+                NativeGlassSurface(
+                    cornerRadius: 26,
+                    style: .regular
+                )
+            }
+            .clipShape(Capsule())
+            .launchDeckGlassIdentity("search-bar", namespace: glassNamespace)
         }
         .frame(maxWidth: .infinity)
     }
@@ -322,24 +336,37 @@ struct LaunchDeckView: View {
                     .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background {
+                NativeGlassSurface(
+                    cornerRadius: 18,
+                    style: .regular
+                )
+            }
+            .clipShape(Capsule())
+            .launchDeckGlassIdentity("pagination", namespace: glassNamespace)
         }
         .frame(maxWidth: .infinity)
     }
 
     private func folderOverlay(for folder: LaunchItem, rootFrame: CGRect) -> some View {
+        let metrics = folderMetrics(for: folder)
         let sourceRect = convertedFolderSourceFrame(in: rootFrame)
-        let targetRect = targetFolderFrame(in: rootFrame)
+        let targetRect = targetFolderFrame(in: rootFrame, metrics: metrics)
         let progress = interactionEngine.folderAnimationProgress
         let animatedFrame = interpolatedRect(from: sourceRect, to: targetRect, progress: progress)
         let contentOpacity = max(0, min((progress - 0.24) / 0.76, 1))
         let backgroundOpacity = 0.2 * progress
 
         return ZStack {
-            Color.black.opacity(backgroundOpacity)
+            Color.black.opacity(backgroundOpacity * 0.8)
                 .ignoresSafeArea()
                 .onTapGesture {
                     requestCloseFolder()
                 }
+
+            let panelShape = RoundedRectangle(cornerRadius: 34, style: .continuous)
 
             VStack(spacing: max(layout.folderSpacing - 4, 18)) {
                 if !folder.title.isEmpty {
@@ -349,7 +376,7 @@ struct LaunchDeckView: View {
                 }
 
                 LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(layout.folderItemWidth), spacing: layout.folderSpacing), count: layout.folderColumns),
+                    columns: Array(repeating: GridItem(.fixed(layout.folderItemWidth), spacing: layout.folderSpacing), count: metrics.columns),
                     spacing: layout.folderSpacing
                 ) {
                     ForEach(folder.children) { child in
@@ -369,28 +396,32 @@ struct LaunchDeckView: View {
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(.white.opacity(0.7))
                         .frame(width: 24, height: 24)
-                        .background(.white.opacity(0.08), in: Circle())
+                        .background {
+                            NativeGlassSurface(
+                                cornerRadius: 12,
+                                style: .regular
+                            )
+                        }
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
             .opacity(contentOpacity)
             .padding(.horizontal, layout.folderHorizontalPadding)
             .padding(.vertical, layout.folderVerticalPadding)
-            .frame(width: animatedFrame.width)
-            .frame(height: animatedFrame.height)
-            .background(
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .fill(Color.black.opacity(0.3))
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.25), radius: 22, y: 14)
+            .frame(width: animatedFrame.width, height: animatedFrame.height, alignment: .top)
+            .background {
+                NativeGlassSurface(
+                    cornerRadius: 34,
+                    style: .regular
+                )
+            }
+            .clipShape(panelShape)
             .opacity(max(progress, 0.001))
             .scaleEffect(0.92 + progress * 0.08)
             .position(x: animatedFrame.midX, y: animatedFrame.midY)
+            .launchDeckGlassIdentity("folder-\(folder.id.uuidString)", namespace: glassNamespace)
+            .launchDeckGlassMatchedGeometry()
         }
     }
 
@@ -433,12 +464,12 @@ struct LaunchDeckView: View {
         )
     }
 
-    private func targetFolderFrame(in rootFrame: CGRect) -> CGRect {
+    private func targetFolderFrame(in rootFrame: CGRect, metrics: FolderPresentationMetrics) -> CGRect {
         CGRect(
-            x: rootFrame.width * 0.5 - layout.folderWidth * 0.5,
-            y: rootFrame.height * 0.5 - layout.folderMinHeight * 0.5,
-            width: layout.folderWidth,
-            height: layout.folderMinHeight
+            x: rootFrame.width * 0.5 - metrics.width * 0.5,
+            y: rootFrame.height * 0.5 - metrics.height * 0.5,
+            width: metrics.width,
+            height: metrics.height
         )
     }
 
@@ -448,6 +479,37 @@ struct LaunchDeckView: View {
             y: source.minY + (target.minY - source.minY) * progress,
             width: source.width + (target.width - source.width) * progress,
             height: source.height + (target.height - source.height) * progress
+        )
+    }
+
+    private func folderMetrics(for folder: LaunchItem) -> FolderPresentationMetrics {
+        let count = max(folder.children.count, 1)
+        let cappedCount = min(count, layout.folderColumns * 4)
+        let columns = min(
+            max(Int(ceil(sqrt(Double(cappedCount)))), 1),
+            layout.folderColumns
+        )
+        let rows = Int(ceil(Double(cappedCount) / Double(columns)))
+        let gridWidth = CGFloat(columns) * layout.folderItemWidth + CGFloat(max(columns - 1, 0)) * layout.folderSpacing
+        let gridHeight = CGFloat(rows) * 114 + CGFloat(max(rows - 1, 0)) * layout.folderSpacing
+        let titleHeight: CGFloat = folder.title.isEmpty ? 0 : layout.folderTitleSize + 12
+        let closeHeight: CGFloat = 24
+        let interSectionSpacing = max(layout.folderSpacing - 4, 18)
+        let spacingCount: CGFloat = folder.title.isEmpty ? 1 : 2
+        let verticalChrome = layout.folderVerticalPadding * 2 + titleHeight + closeHeight + interSectionSpacing * spacingCount
+        let horizontalChrome = layout.folderHorizontalPadding * 2
+
+        let width = min(
+            max(gridWidth + horizontalChrome, 280),
+            layout.folderWidth
+        )
+        let height = max(gridHeight + verticalChrome, 220)
+
+        return FolderPresentationMetrics(
+            columns: columns,
+            rows: rows,
+            width: width,
+            height: height
         )
     }
 
@@ -477,6 +539,13 @@ struct LaunchDeckView: View {
             break
         }
     }
+}
+
+private struct FolderPresentationMetrics {
+    let columns: Int
+    let rows: Int
+    let width: CGFloat
+    let height: CGFloat
 }
 
 private struct LaunchpadLayout: Equatable {
@@ -1005,9 +1074,16 @@ private struct TileIconView: View {
     var body: some View {
         ZStack {
             if item.isFolder {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.black.opacity(0.28))
+                RoundedRectangle(cornerRadius: 21, style: .continuous)
+                    .fill(.clear)
                     .frame(width: folderIconSize, height: folderIconSize)
+                    .background {
+                        NativeGlassSurface(
+                            cornerRadius: 21,
+                            style: .regular
+                        )
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
 
                 FolderPreviewView(children: Array(item.children.prefix(4)), miniIconSize: miniIconSize, shouldLoadIcons: shouldLoadIcons)
             } else if let icon {
@@ -1066,7 +1142,13 @@ private struct MiniAppIconView: View {
                 AppIconImageView(image: icon)
             } else {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.12))
+                    .fill(.clear)
+                    .background {
+                        NativeGlassSurface(
+                            cornerRadius: 6,
+                            style: .clear
+                        )
+                    }
             }
         }
         .frame(width: size, height: size)
@@ -1205,6 +1287,77 @@ private enum AppIconResolver {
         return Array(NSOrderedSet(array: candidates)) as? [String] ?? candidates
     }
 
+}
+
+private struct NativeGlassSurface: NSViewRepresentable {
+    enum Variant {
+        case regular
+        case clear
+    }
+
+    let cornerRadius: CGFloat
+    let style: Variant
+
+    func makeNSView(context: Context) -> NSView {
+        if #available(macOS 26.0, *) {
+            let glassView = NSGlassEffectView()
+            glassView.style = style.nsGlassStyle
+            glassView.cornerRadius = cornerRadius
+            glassView.wantsLayer = true
+            glassView.layer?.masksToBounds = true
+            return glassView
+        } else {
+            let visualEffect = NSVisualEffectView()
+            visualEffect.material = .hudWindow
+            visualEffect.blendingMode = .behindWindow
+            visualEffect.state = .active
+            visualEffect.wantsLayer = true
+            visualEffect.layer?.cornerRadius = cornerRadius
+            visualEffect.layer?.masksToBounds = true
+            return visualEffect
+        }
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if #available(macOS 26.0, *), let glassView = nsView as? NSGlassEffectView {
+            glassView.style = style.nsGlassStyle
+            glassView.cornerRadius = cornerRadius
+        } else if let visualEffect = nsView as? NSVisualEffectView {
+            visualEffect.layer?.cornerRadius = cornerRadius
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private extension NativeGlassSurface.Variant {
+    var nsGlassStyle: NSGlassEffectView.Style {
+        switch self {
+        case .regular:
+            .regular
+        case .clear:
+            .clear
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func launchDeckGlassIdentity<ID: Hashable & Sendable>(_ id: ID, namespace: Namespace.ID) -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffectID(id, in: namespace)
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func launchDeckGlassMatchedGeometry() -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffectTransition(.matchedGeometry)
+        } else {
+            self
+        }
+    }
 }
 
 private extension Array {
