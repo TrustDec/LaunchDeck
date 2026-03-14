@@ -5,32 +5,40 @@ import SwiftUI
 struct LaunchDeckShellView: View {
     @ObservedObject var store: LaunchDeckShellStore
     @Environment(\.colorScheme) private var colorScheme
-    @State private var pageColumns = 6
-    @State private var pageRows = 5
+    @State private var pageColumns = 8
+    @State private var pageRows = 6
     @State private var wallpaper: NSImage?
 
     private var metrics: ShellLayoutMetrics {
         store.compactMode ? .compact : .regular
     }
 
+    private let horizontalInset: CGFloat = 20
+    private let verticalChromeAllowance: CGFloat = 220
+
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 backgroundAtmosphere
 
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleCanvasTap()
+                    }
+
                 VStack(spacing: 28) {
                     topBar
-                        .padding(.top, 30)
+                        .padding(.top, 10)
 
                     if store.isSearching {
                         searchResultsGrid(in: proxy.size)
                     } else {
                         pageGrid(in: proxy.size)
                     }
-
-                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 36)
+                .padding(.horizontal, horizontalInset)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
 
                 SearchCommandMonitor(
                     isEnabled: store.isSearching,
@@ -39,6 +47,29 @@ struct LaunchDeckShellView: View {
                     }
                 )
                 .allowsHitTesting(false)
+
+                WheelPagingInputMonitor(
+                    isEnabled: !store.isSearching && store.selectedFolder == nil && store.pageCount > 1,
+                    onPreviousPage: {
+                        store.previousPage()
+                    },
+                    onNextPage: {
+                        store.nextPage()
+                    }
+                )
+                .allowsHitTesting(false)
+
+                MouseDragPagingInputMonitor(
+                    isEnabled: !store.isSearching && store.selectedFolder == nil && store.pageCount > 1,
+                    onPreviousPage: {
+                        store.previousPage()
+                    },
+                    onNextPage: {
+                        store.nextPage()
+                    }
+                )
+                .allowsHitTesting(false)
+
             }
             .task {
                 await store.loadIfNeeded()
@@ -47,12 +78,14 @@ struct LaunchDeckShellView: View {
                 store.syncSearchSelection()
             }
             .task(id: "\(Int(proxy.size.width))x\(Int(proxy.size.height))-\(store.compactMode)") {
-                let minColumns = store.compactMode ? 6 : 7
-                let maxColumns = store.compactMode ? 11 : 10
-                let minRows = store.compactMode ? 4 : 5
-                let maxRows = store.compactMode ? 7 : 6
-                let columns = max(min(Int((proxy.size.width - 120) / metrics.horizontalFootprint), maxColumns), minColumns)
-                let rows = max(min(Int((proxy.size.height - 240) / metrics.verticalFootprint), maxRows), minRows)
+                let preferredColumns = 8
+                let preferredRows = 6
+                let availableWidth = max(proxy.size.width - horizontalInset * 2, metrics.labelWidth)
+                let availableHeight = max(proxy.size.height - verticalChromeAllowance, metrics.cellHeight)
+                let fittedColumns = max(Int((availableWidth + metrics.columnSpacing) / metrics.horizontalFootprint), 1)
+                let fittedRows = max(Int((availableHeight + metrics.rowSpacing) / metrics.verticalFootprint), 1)
+                let columns = max(min(preferredColumns, fittedColumns), 1)
+                let rows = max(min(preferredRows, fittedRows), 1)
                 pageColumns = columns
                 pageRows = rows
                 store.updatePageCapacity(columns * rows)
@@ -246,20 +279,6 @@ struct LaunchDeckShellView: View {
                     SystemGlassSurface(cornerRadius: 18, style: .regular)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                Button {
-                    NSApp.keyWindow?.close()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                        .frame(width: 36, height: 36)
-                        .background {
-                            SystemGlassSurface(cornerRadius: 18, style: .regular)
-                        }
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
             }
 
             if store.isSearching, let selectedItem = store.primarySearchResult {
@@ -309,16 +328,26 @@ struct LaunchDeckShellView: View {
     }
 
     private func pageGrid(in size: CGSize) -> some View {
-        let contentWidth = max(size.width - 72, 320)
-        return NativePageControllerHost(pageCount: store.pageCount, selection: pageSelectionBinding) { page in
-            let clampedPage = min(max(page, 0), max(store.pageCount - 1, 0))
-            let pageItems = store.pagedItems[clampedPage]
-            return AnyView(
-                pageContent(items: pageItems)
-                    .frame(width: contentWidth)
-            )
+        let contentWidth = max(size.width - horizontalInset * 2, 320)
+        let contentHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * (metrics.rowSpacing - 6) + 8
+        return VStack(spacing: 14) {
+            NativePageControllerHost(
+                pageCount: store.pageCount,
+                selection: pageSelectionBinding,
+                refreshToken: pageRefreshToken
+            ) { page in
+                let clampedPage = min(max(page, 0), max(store.pageCount - 1, 0))
+                let pageItems = store.pagedItems[clampedPage]
+                return AnyView(
+                    pageContent(items: pageItems)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                )
+            }
+            .frame(height: contentHeight, alignment: .center)
+
+            NativePageIndicator(pageCount: store.pageCount, selection: pageSelectionBinding)
+                .frame(height: store.pageCount > 1 ? 24 : 0)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
         .frame(width: contentWidth, alignment: .center)
     }
 
@@ -329,9 +358,19 @@ struct LaunchDeckShellView: View {
         )
     }
 
+    private var pageRefreshToken: Int {
+        var hasher = Hasher()
+        hasher.combine(pageColumns)
+        hasher.combine(pageRows)
+        hasher.combine(store.pageCount)
+        hasher.combine(store.items.count)
+        hasher.combine(store.query)
+        return hasher.finalize()
+    }
+
     private func pageContent(items: [LaunchItem]) -> some View {
         let rows = items.chunked(into: max(pageColumns, 1))
-        let rowHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * metrics.rowSpacing
+        let rowHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * (metrics.rowSpacing - 6)
 
         return VStack(alignment: .center, spacing: metrics.rowSpacing - 6) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, rowItems in
@@ -362,10 +401,11 @@ struct LaunchDeckShellView: View {
                             .frame(width: metrics.labelWidth, height: metrics.cellHeight)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(minHeight: rowHeight, alignment: .top)
+        .frame(height: rowHeight, alignment: .top)
         .padding(.top, 8)
     }
 
@@ -411,6 +451,22 @@ struct LaunchDeckShellView: View {
         }
         .padding(28)
         .frame(minWidth: 640, minHeight: 460, alignment: .topLeading)
+        .background {
+            SystemGlassSurface(cornerRadius: 28, style: .regular)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.2), lineWidth: 1)
+        }
+    }
+
+    private func handleCanvasTap() {
+        if store.selectedFolder != nil {
+            store.closeFolder()
+            return
+        }
+        NSApp.keyWindow?.close()
     }
 
 }
@@ -458,11 +514,82 @@ private enum DesktopWallpaperLoader {
     }
 }
 
+@MainActor
+private enum AppIconCache {
+    static let baseCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    static let sizedCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 768
+        return cache
+    }()
+
+    static func image(for path: String, targetSize: CGFloat) -> NSImage {
+        let normalizedSize = max(targetSize.rounded(.toNearestOrEven), 16)
+        let sizedKey = "\(path)#\(Int(normalizedSize))" as NSString
+        if let cached = sizedCache.object(forKey: sizedKey) {
+            return cached
+        }
+
+        let base = baseImage(for: path)
+        let rasterized = rasterize(base, targetSize: normalizedSize)
+        sizedCache.setObject(rasterized, forKey: sizedKey)
+        return rasterized
+    }
+
+    static func cachedImage(for path: String, targetSize: CGFloat) -> NSImage? {
+        let normalizedSize = max(targetSize.rounded(.toNearestOrEven), 16)
+        let sizedKey = "\(path)#\(Int(normalizedSize))" as NSString
+        return sizedCache.object(forKey: sizedKey)
+    }
+
+    private static func baseImage(for path: String) -> NSImage {
+        let key = path as NSString
+        if let cached = baseCache.object(forKey: key) {
+            return cached
+        }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        baseCache.setObject(image, forKey: key)
+        return image
+    }
+
+    private static func rasterize(_ image: NSImage, targetSize: CGFloat) -> NSImage {
+        let size = NSSize(width: targetSize, height: targetSize)
+        let rendered = NSImage(size: size)
+        rendered.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(
+            in: NSRect(origin: .zero, size: size),
+            from: .zero,
+            operation: .copy,
+            fraction: 1
+        )
+        rendered.unlockFocus()
+        return rendered
+    }
+}
+
+@MainActor
 private struct ShellIconTile: View {
     let item: LaunchItem
     let isActive: Bool
     let metrics: ShellLayoutMetrics
     @State private var icon: NSImage?
+
+    init(item: LaunchItem, isActive: Bool, metrics: ShellLayoutMetrics) {
+        self.item = item
+        self.isActive = isActive
+        self.metrics = metrics
+        if !item.isFolder, let path = item.bundleURL?.path {
+            _icon = State(initialValue: AppIconCache.cachedImage(for: path, targetSize: metrics.iconFrame))
+        } else {
+            _icon = State(initialValue: nil)
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -496,16 +623,33 @@ private struct ShellIconTile: View {
             RoundedRectangle(cornerRadius: item.isFolder ? metrics.folderCornerRadius : metrics.iconCornerRadius, style: .continuous)
                 .stroke(Color(nsColor: .controlAccentColor).opacity(isActive ? 0.7 : 0), lineWidth: 1.5)
         }
-        .task(id: item.id) {
+        .task(id: "\(item.id.uuidString)-\(Int(metrics.iconFrame))") {
             guard !item.isFolder, let bundleURL = item.bundleURL else { return }
-            icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
+            if let cached = AppIconCache.cachedImage(for: bundleURL.path, targetSize: metrics.iconFrame) {
+                icon = cached
+                return
+            }
+            let resolved = AppIconCache.image(for: bundleURL.path, targetSize: metrics.iconFrame)
+            if icon !== resolved {
+                icon = resolved
+            }
         }
     }
 }
 
+@MainActor
 private struct MiniShellIcon: View {
     let bundleURL: URL?
     @State private var icon: NSImage?
+
+    init(bundleURL: URL?) {
+        self.bundleURL = bundleURL
+        if let path = bundleURL?.path {
+            _icon = State(initialValue: AppIconCache.cachedImage(for: path, targetSize: 24))
+        } else {
+            _icon = State(initialValue: nil)
+        }
+    }
 
     var body: some View {
         Group {
@@ -518,9 +662,16 @@ private struct MiniShellIcon: View {
         }
         .frame(width: 24, height: 24)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .task(id: bundleURL?.path()) {
+        .task(id: "\(bundleURL?.path ?? "")-24") {
             guard let bundleURL else { return }
-            icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
+            if let cached = AppIconCache.cachedImage(for: bundleURL.path, targetSize: 24) {
+                icon = cached
+                return
+            }
+            let resolved = AppIconCache.image(for: bundleURL.path, targetSize: 24)
+            if icon !== resolved {
+                icon = resolved
+            }
         }
     }
 }
@@ -653,23 +804,23 @@ private struct ShellLayoutMetrics {
     }
 
     static let regular = ShellLayoutMetrics(
-        iconFrame: 96,
-        labelWidth: 120,
-        cellHeight: 132,
+        iconFrame: 108,
+        labelWidth: 130,
+        cellHeight: 146,
         columnSpacing: 34,
         rowSpacing: 34,
-        folderTileSize: 96,
+        folderTileSize: 108,
         iconCornerRadius: 22,
         folderCornerRadius: 22
     )
 
     static let compact = ShellLayoutMetrics(
-        iconFrame: 74,
-        labelWidth: 100,
-        cellHeight: 106,
+        iconFrame: 84,
+        labelWidth: 108,
+        cellHeight: 118,
         columnSpacing: 24,
         rowSpacing: 26,
-        folderTileSize: 86,
+        folderTileSize: 94,
         iconCornerRadius: 20,
         folderCornerRadius: 20
     )
@@ -698,13 +849,16 @@ private struct AppIconImageView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSImageView, context: Context) {
-        nsView.image = image
+        if nsView.image !== image {
+            nsView.image = image
+        }
     }
 }
 
 private struct NativePageControllerHost: NSViewControllerRepresentable {
     let pageCount: Int
     @Binding var selection: Int
+    let refreshToken: Int
     let makePage: (Int) -> AnyView
 
     private var arrangedObjects: [Int] {
@@ -736,12 +890,26 @@ private struct NativePageControllerHost: NSViewControllerRepresentable {
         }
 
         if controller.selectedIndex != clampedSelection {
-            controller.selectedIndex = clampedSelection
+            if clampedSelection == controller.selectedIndex + 1 {
+                controller.navigateForward(nil)
+            } else if clampedSelection == controller.selectedIndex - 1 {
+                controller.navigateBack(nil)
+            } else {
+                controller.selectedIndex = clampedSelection
+            }
+        }
+
+        if controller.selectedIndex == clampedSelection {
+            context.coordinator.refreshVisiblePageIfNeeded(
+                in: controller,
+                token: refreshToken
+            )
         }
     }
 
     final class Coordinator: NSObject, NSPageControllerDelegate {
         var parent: NativePageControllerHost
+        private var lastRefreshToken: Int?
 
         init(parent: NativePageControllerHost) {
             self.parent = parent
@@ -761,6 +929,21 @@ private struct NativePageControllerHost: NSViewControllerRepresentable {
                 return
             }
             host.rootView = parent.makePage(page)
+            host.view.frame = pageController.view.bounds
+            host.view.autoresizingMask = [.width, .height]
+        }
+
+        @MainActor
+        func refreshVisiblePageIfNeeded(in pageController: NSPageController, token: Int) {
+            guard lastRefreshToken != token else { return }
+            lastRefreshToken = token
+            guard let host = pageController.selectedViewController as? NativePageHostingController else {
+                return
+            }
+            let page = min(max(pageController.selectedIndex, 0), max(parent.pageCount - 1, 0))
+            host.rootView = parent.makePage(page)
+            host.view.frame = pageController.view.bounds
+            host.view.autoresizingMask = [.width, .height]
         }
 
         func pageControllerDidEndLiveTransition(_ pageController: NSPageController) {
@@ -771,6 +954,10 @@ private struct NativePageControllerHost: NSViewControllerRepresentable {
                     self?.parent.selection = selected
                 }
             }
+        }
+
+        func pageController(_ pageController: NSPageController, frameFor object: Any?) -> NSRect {
+            pageController.view.bounds
         }
     }
 }
@@ -783,6 +970,275 @@ private final class NativePageHostingController: NSHostingController<AnyView> {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+}
+
+private struct WheelPagingInputMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let onPreviousPage: () -> Void
+    let onNextPage: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPreviousPage: onPreviousPage, onNextPage: onNextPage)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.install(isEnabled: isEnabled)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onPreviousPage = onPreviousPage
+        context.coordinator.onNextPage = onNextPage
+        context.coordinator.install(isEnabled: isEnabled)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var onPreviousPage: () -> Void
+        var onNextPage: () -> Void
+        private var monitor: Any?
+        private var isInstalled = false
+        private var lastTriggerTime: TimeInterval = 0
+        private var preciseGestureConsumed = false
+        private var lastPreciseEventTime: TimeInterval = 0
+
+        init(
+            onPreviousPage: @escaping () -> Void,
+            onNextPage: @escaping () -> Void
+        ) {
+            self.onPreviousPage = onPreviousPage
+            self.onNextPage = onNextPage
+        }
+
+        func install(isEnabled: Bool) {
+            guard isEnabled else {
+                uninstall()
+                return
+            }
+
+            guard !isInstalled else {
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self else { return event }
+
+                let now = ProcessInfo.processInfo.systemUptime
+                if event.hasPreciseScrollingDeltas {
+                    if now - lastPreciseEventTime > 0.3 {
+                        preciseGestureConsumed = false
+                    }
+                    lastPreciseEventTime = now
+
+                    if event.phase == .began {
+                        preciseGestureConsumed = false
+                    }
+
+                    if event.phase == .ended || event.phase == .cancelled {
+                        preciseGestureConsumed = false
+                        return event
+                    }
+
+                    if event.momentumPhase != [] {
+                        return nil
+                    }
+
+                    if preciseGestureConsumed {
+                        return nil
+                    }
+                }
+
+                let minimumInterval: TimeInterval = event.hasPreciseScrollingDeltas ? 0.12 : 0.18
+                if now - lastTriggerTime < minimumInterval {
+                    return event
+                }
+
+                let deltaX = event.scrollingDeltaX
+                let deltaY = event.scrollingDeltaY
+                let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 2.5 : 1.0
+
+                if abs(deltaY) >= abs(deltaX), abs(deltaY) >= threshold {
+                    lastTriggerTime = now
+                    if event.hasPreciseScrollingDeltas {
+                        preciseGestureConsumed = true
+                    }
+                    deltaY > 0 ? onNextPage() : onPreviousPage()
+                    return nil
+                }
+
+                if abs(deltaX) >= threshold {
+                    lastTriggerTime = now
+                    if event.hasPreciseScrollingDeltas {
+                        preciseGestureConsumed = true
+                    }
+                    deltaX > 0 ? onNextPage() : onPreviousPage()
+                    return nil
+                }
+
+                return event
+            }
+            isInstalled = true
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+            isInstalled = false
+        }
+
+        deinit {
+            uninstall()
+        }
+    }
+}
+
+private struct NativePageIndicator: View {
+    let pageCount: Int
+    @Binding var selection: Int
+
+    var body: some View {
+        if pageCount > 1 {
+            HStack(spacing: 9) {
+                ForEach(0..<pageCount, id: \.self) { index in
+                    Button {
+                        selection = index
+                    } label: {
+                        Circle()
+                            .fill(
+                                index == selection
+                                    ? Color.white.opacity(0.95)
+                                    : Color.white.opacity(0.34)
+                            )
+                            .frame(width: index == selection ? 8 : 6, height: index == selection ? 8 : 6)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background {
+                SystemGlassSurface(cornerRadius: 12, style: .clear)
+            }
+            .clipShape(Capsule())
+        }
+    }
+}
+
+private struct MouseDragPagingInputMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let onPreviousPage: () -> Void
+    let onNextPage: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPreviousPage: onPreviousPage, onNextPage: onNextPage)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.install(isEnabled: isEnabled)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onPreviousPage = onPreviousPage
+        context.coordinator.onNextPage = onNextPage
+        context.coordinator.install(isEnabled: isEnabled)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var onPreviousPage: () -> Void
+        var onNextPage: () -> Void
+        private var downMonitor: Any?
+        private var dragMonitor: Any?
+        private var upMonitor: Any?
+        private var isInstalled = false
+        private var isDragging = false
+        private var hasTriggered = false
+        private var dragStart: NSPoint = .zero
+
+        init(
+            onPreviousPage: @escaping () -> Void,
+            onNextPage: @escaping () -> Void
+        ) {
+            self.onPreviousPage = onPreviousPage
+            self.onNextPage = onNextPage
+        }
+
+        func install(isEnabled: Bool) {
+            guard isEnabled else {
+                uninstall()
+                return
+            }
+
+            guard !isInstalled else {
+                return
+            }
+
+            downMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self else { return event }
+                isDragging = true
+                hasTriggered = false
+                dragStart = event.locationInWindow
+                return event
+            }
+
+            dragMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { [weak self] event in
+                guard let self else { return event }
+                guard isDragging, !hasTriggered else { return event }
+
+                let deltaX = event.locationInWindow.x - dragStart.x
+                let deltaY = event.locationInWindow.y - dragStart.y
+                guard abs(deltaX) > abs(deltaY), abs(deltaX) >= 40 else {
+                    return event
+                }
+
+                hasTriggered = true
+                deltaX < 0 ? onNextPage() : onPreviousPage()
+                return nil
+            }
+
+            upMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                guard let self else { return event }
+                isDragging = false
+                hasTriggered = false
+                return event
+            }
+
+            isInstalled = true
+        }
+
+        func uninstall() {
+            if let downMonitor {
+                NSEvent.removeMonitor(downMonitor)
+            }
+            if let dragMonitor {
+                NSEvent.removeMonitor(dragMonitor)
+            }
+            if let upMonitor {
+                NSEvent.removeMonitor(upMonitor)
+            }
+            downMonitor = nil
+            dragMonitor = nil
+            upMonitor = nil
+            isInstalled = false
+            isDragging = false
+            hasTriggered = false
+        }
+
+        deinit {
+            uninstall()
+        }
     }
 }
 
