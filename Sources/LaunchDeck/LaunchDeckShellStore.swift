@@ -1,11 +1,42 @@
 import AppKit
 import Foundation
 
+struct LaunchDeckSearchMatchScore: Comparable {
+    let titlePrefix: Int
+    let titleContains: Int
+    let subtitleContains: Int
+    let childContains: Int
+    let recentLaunchBonus: Int
+    let systemAppBonus: Int
+    let titleLengthBias: Int
+
+    static func < (lhs: LaunchDeckSearchMatchScore, rhs: LaunchDeckSearchMatchScore) -> Bool {
+        [
+            lhs.titlePrefix,
+            lhs.titleContains,
+            lhs.subtitleContains,
+            lhs.childContains,
+            lhs.recentLaunchBonus,
+            lhs.systemAppBonus,
+            lhs.titleLengthBias,
+        ].lexicographicallyPrecedes([
+            rhs.titlePrefix,
+            rhs.titleContains,
+            rhs.subtitleContains,
+            rhs.childContains,
+            rhs.recentLaunchBonus,
+            rhs.systemAppBonus,
+            rhs.titleLengthBias,
+        ])
+    }
+}
+
 @MainActor
 final class LaunchDeckShellStore: ObservableObject {
     private enum DefaultsKey {
         static let compactMode = "LaunchDeck.compactMode"
         static let hiddenItems = "LaunchDeck.hiddenItems"
+        static let recentLaunches = "LaunchDeck.recentLaunches"
     }
 
     @Published private(set) var items: [LaunchItem] = []
@@ -15,11 +46,11 @@ final class LaunchDeckShellStore: ObservableObject {
     @Published var currentPage = 0
     @Published var compactMode = UserDefaults.standard.bool(forKey: DefaultsKey.compactMode)
     @Published private(set) var hiddenItems: [LaunchItem]
-    @Published var isEditing = false
     @Published var selectedSearchResultID: UUID?
 
     private let persistence: LaunchDeckPersistenceController
     private(set) var pageSize = 30
+    private var recentLaunchBundlePaths: [String] = UserDefaults.standard.stringArray(forKey: DefaultsKey.recentLaunches) ?? []
 
     init(persistence: LaunchDeckPersistenceController) {
         self.persistence = persistence
@@ -35,9 +66,20 @@ final class LaunchDeckShellStore: ObservableObject {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return items }
 
-        return items.filter { item in
-            item.searchableText.contains(normalized)
-        }
+        return items
+            .compactMap { item -> (LaunchItem, LaunchDeckSearchMatchScore)? in
+                guard let score = item.searchScore(for: normalized, recentBundlePaths: recentLaunchBundlePaths) else {
+                    return nil
+                }
+                return (item, score)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 {
+                    return lhs.1 > rhs.1
+                }
+                return lhs.0.title.localizedCaseInsensitiveCompare(rhs.0.title) == .orderedAscending
+            }
+            .map(\.0)
     }
 
     var isSearching: Bool {
@@ -131,15 +173,15 @@ final class LaunchDeckShellStore: ObservableObject {
     }
 
     func activate(_ item: LaunchItem) {
-        if isEditing {
-            if item.isFolder {
-                selectedFolder = selectedFolder?.id == item.id ? nil : item
-            }
-            return
-        }
-
         if item.isFolder {
-            selectedFolder = item
+            guard let topLevelFolder = items.first(where: { $0.id == item.id && $0.isFolder }) else {
+                return
+            }
+            if isSearching {
+                query = ""
+                selectedSearchResultID = nil
+            }
+            selectedFolder = topLevelFolder
             return
         }
 
@@ -150,24 +192,25 @@ final class LaunchDeckShellStore: ObservableObject {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration)
+        rememberRecentLaunch(for: bundleURL.path)
+    }
+
+    func revealInFinder(_ item: LaunchItem) {
+        guard let bundleURL = item.bundleURL else {
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([bundleURL])
+    }
+
+    func revealSelectedSearchResultInFinder() {
+        guard let item = primarySearchResult else {
+            return
+        }
+        revealInFinder(item)
     }
 
     func closeFolder() {
         selectedFolder = nil
-    }
-
-    func renameItem(id: UUID, title: String) {
-        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else {
-            return
-        }
-
-        items = items.mapRecursively { item in
-            guard item.id == id else { return item }
-            return item.updatingTitle(normalized)
-        }
-        refreshSelectedFolder()
-        persistCurrentLayout()
     }
 
     func hideItem(id: UUID) {
@@ -184,98 +227,6 @@ final class LaunchDeckShellStore: ObservableObject {
         persistHiddenItems()
     }
 
-    func moveTopLevelItem(id: UUID, pageDelta: Int) {
-        guard let currentIndex = items.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let currentPageIndex = currentIndex / pageSize
-        let targetPageIndex = min(max(currentPageIndex + pageDelta, 0), max(pageCount - 1, 0))
-        guard targetPageIndex != currentPageIndex else {
-            return
-        }
-
-        var reordered = items
-        let item = reordered.remove(at: currentIndex)
-        let rawTargetIndex = targetPageIndex * pageSize
-        let targetIndex = min(max(rawTargetIndex, 0), reordered.count)
-        reordered.insert(item, at: targetIndex)
-        items = reordered
-        currentPage = min(currentPage, max(pageCount - 1, 0))
-        refreshSelectedFolder()
-        persistCurrentLayout()
-    }
-
-    func moveTopLevelItem(id: UUID, toPage page: Int) {
-        guard let currentIndex = items.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let targetPage = min(max(page, 0), max(pageCount - 1, 0))
-        let currentPageIndex = currentIndex / pageSize
-        guard targetPage != currentPageIndex else {
-            currentPage = targetPage
-            return
-        }
-
-        var reordered = items
-        let item = reordered.remove(at: currentIndex)
-        let targetIndex = min(max(targetPage * pageSize, 0), reordered.count)
-        reordered.insert(item, at: targetIndex)
-        items = reordered
-        currentPage = targetPage
-        refreshSelectedFolder()
-        persistCurrentLayout()
-    }
-
-    func ungroupItem(id: UUID) {
-        guard let result = items.removingChildFromTopLevelFolder(id: id) else {
-            return
-        }
-
-        items = result.items
-        refreshSelectedFolder()
-        persistCurrentLayout()
-    }
-
-    func dissolveFolder(id: UUID) {
-        guard let result = items.dissolvingTopLevelFolder(id: id) else {
-            return
-        }
-
-        items = result
-        if selectedFolder?.id == id {
-            selectedFolder = nil
-        } else {
-            refreshSelectedFolder()
-        }
-        currentPage = min(currentPage, max(pageCount - 1, 0))
-        persistCurrentLayout()
-    }
-
-    func reorderItemWithinFolder(draggedID: UUID, targetID: UUID, folderID: UUID) {
-        guard draggedID != targetID else {
-            return
-        }
-
-        items = items.mapRecursively { item in
-            guard item.id == folderID,
-                  let draggedIndex = item.children.firstIndex(where: { $0.id == draggedID }),
-                  let targetIndex = item.children.firstIndex(where: { $0.id == targetID })
-            else {
-                return item
-            }
-
-            var children = item.children
-            let draggedItem = children.remove(at: draggedIndex)
-            let normalizedTarget = min(max(targetIndex, 0), children.count)
-            children.insert(draggedItem, at: normalizedTarget)
-            return item.updatingChildren(children)
-        }
-
-        refreshSelectedFolder()
-        persistCurrentLayout()
-    }
 
     func restoreHiddenItem(id: UUID) {
         guard let hiddenIndex = hiddenItems.firstIndex(where: { $0.id == id }) else {
@@ -332,8 +283,6 @@ final class LaunchDeckShellStore: ObservableObject {
     func handleExitCommand() {
         if selectedFolder != nil {
             closeFolder()
-        } else if isEditing {
-            isEditing = false
         } else {
             NSApp.keyWindow?.close()
             NSApp.hide(nil)
@@ -353,12 +302,12 @@ final class LaunchDeckShellStore: ObservableObject {
         guard let selectedSearchResultID,
               let currentIndex = filteredItems.firstIndex(where: { $0.id == selectedSearchResultID })
         else {
-            selectedSearchResultID = filteredItems.first?.id
+            self.selectedSearchResultID = filteredItems.first?.id
             return
         }
 
         let nextIndex = min(currentIndex + 1, filteredItems.count - 1)
-        selectedSearchResultID = filteredItems[nextIndex].id
+        self.selectedSearchResultID = filteredItems[nextIndex].id
     }
 
     func selectPreviousSearchResult() {
@@ -369,73 +318,24 @@ final class LaunchDeckShellStore: ObservableObject {
         guard let selectedSearchResultID,
               let currentIndex = filteredItems.firstIndex(where: { $0.id == selectedSearchResultID })
         else {
-            selectedSearchResultID = filteredItems.first?.id
+            self.selectedSearchResultID = filteredItems.first?.id
             return
         }
 
         let previousIndex = max(currentIndex - 1, 0)
-        selectedSearchResultID = filteredItems[previousIndex].id
-    }
-
-    func setEditing(_ isEditing: Bool) {
-        self.isEditing = isEditing
-        if !isEditing, selectedFolder?.children.isEmpty == true {
-            selectedFolder = nil
-        }
-    }
-
-    func handleTopLevelDrop(draggedID: UUID, onto targetID: UUID) {
-        guard draggedID != targetID,
-              let draggedIndex = items.firstIndex(where: { $0.id == draggedID }),
-              let targetIndex = items.firstIndex(where: { $0.id == targetID })
-        else {
-            return
-        }
-
-        let draggedItem = items[draggedIndex]
-        let targetItem = items[targetIndex]
-
-        if targetItem.isFolder {
-            var updatedItems = items
-            let normalizedDraggedIndex = draggedIndex > targetIndex ? draggedIndex : draggedIndex
-            updatedItems.remove(at: normalizedDraggedIndex)
-            guard let refreshedTargetIndex = updatedItems.firstIndex(where: { $0.id == targetID }) else {
-                return
-            }
-            let updatedFolder = updatedItems[refreshedTargetIndex].updatingChildren(
-                updatedItems[refreshedTargetIndex].children + [draggedItem]
-            )
-            updatedItems[refreshedTargetIndex] = updatedFolder
-            items = updatedItems
-        } else if !draggedItem.isFolder, !targetItem.isFolder {
-            var updatedItems = items
-            let firstIndex = min(draggedIndex, targetIndex)
-            let secondIndex = max(draggedIndex, targetIndex)
-            let firstItem = updatedItems.remove(at: secondIndex)
-            let secondItem = updatedItems.remove(at: firstIndex)
-            let folder = LaunchItem.folder(
-                title: "Folder",
-                children: [secondItem, firstItem]
-            )
-            updatedItems.insert(folder, at: firstIndex)
-            items = updatedItems
-        } else {
-            var reordered = items
-            let draggedItem = reordered.remove(at: draggedIndex)
-            guard let refreshedTargetIndex = reordered.firstIndex(where: { $0.id == targetID }) else {
-                return
-            }
-            reordered.insert(draggedItem, at: refreshedTargetIndex)
-            items = reordered
-        }
-
-        refreshSelectedFolder()
-        persistCurrentLayout()
+        self.selectedSearchResultID = filteredItems[previousIndex].id
     }
 
     private func persistCurrentLayout() {
         persistence.saveLayout(items: items)
         persistence.saveSnapshot(items: items)
+    }
+
+    private func rememberRecentLaunch(for bundlePath: String) {
+        recentLaunchBundlePaths.removeAll { $0 == bundlePath }
+        recentLaunchBundlePaths.insert(bundlePath, at: 0)
+        recentLaunchBundlePaths = Array(recentLaunchBundlePaths.prefix(12))
+        UserDefaults.standard.set(recentLaunchBundlePaths, forKey: DefaultsKey.recentLaunches)
     }
 
     private func persistHiddenItems() {
@@ -463,14 +363,6 @@ final class LaunchDeckShellStore: ObservableObject {
 }
 
 private extension Array where Element == LaunchItem {
-    func mapRecursively(_ transform: (LaunchItem) -> LaunchItem) -> [LaunchItem] {
-        map { item in
-            let transformedChildren = item.children.mapRecursively(transform)
-            let transformedItem = item.children == transformedChildren ? item : item.updatingChildren(transformedChildren)
-            return transform(transformedItem)
-        }
-    }
-
     func removingItemRecursively(id: UUID) -> [LaunchItem] {
         compactMap { item in
             guard item.id != id else {
@@ -494,46 +386,6 @@ private extension Array where Element == LaunchItem {
         return nil
     }
 
-    func removingChildFromTopLevelFolder(id: UUID) -> (items: [LaunchItem], movedItem: LaunchItem)? {
-        for (index, item) in enumerated() where item.isFolder {
-            guard let childIndex = item.children.firstIndex(where: { $0.id == id }) else {
-                continue
-            }
-
-            let movedItem = item.children[childIndex]
-            var updatedItems = self
-            var folderChildren = item.children
-            folderChildren.remove(at: childIndex)
-
-            updatedItems.remove(at: index)
-
-            if folderChildren.isEmpty {
-                updatedItems.insert(movedItem, at: index)
-            } else if folderChildren.count == 1 {
-                updatedItems.insert(folderChildren[0], at: index)
-                updatedItems.insert(movedItem, at: Swift.min(index + 1, updatedItems.count))
-            } else {
-                updatedItems.insert(item.updatingChildren(folderChildren), at: index)
-                updatedItems.insert(movedItem, at: Swift.min(index + 1, updatedItems.count))
-            }
-
-            return (updatedItems, movedItem)
-        }
-
-        return nil
-    }
-
-    func dissolvingTopLevelFolder(id: UUID) -> [LaunchItem]? {
-        guard let folderIndex = firstIndex(where: { $0.id == id && $0.isFolder }) else {
-            return nil
-        }
-
-        let folder = self[folderIndex]
-        var updatedItems = self
-        updatedItems.remove(at: folderIndex)
-        updatedItems.insert(contentsOf: folder.children, at: folderIndex)
-        return updatedItems
-    }
 }
 
 private enum ShellAppCatalogScanner {

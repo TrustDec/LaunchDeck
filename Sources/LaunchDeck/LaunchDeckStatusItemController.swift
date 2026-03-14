@@ -4,7 +4,7 @@ import AppKit
 final class LaunchDeckStatusItemController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var contextMenu = NSMenu()
-    private let onToggle: () -> Void
+    private let onToggle: (NSRect?) -> Void
     private let onReload: () -> Void
     private let onResetLayout: () -> Void
     private let onToggleCompactMode: () -> Void
@@ -15,7 +15,7 @@ final class LaunchDeckStatusItemController: NSObject {
     private let onSelectHotCorner: (LaunchDeckHotCornersMonitor.Corner) -> Void
 
     init(
-        onToggle: @escaping () -> Void,
+        onToggle: @escaping (NSRect?) -> Void,
         onReload: @escaping () -> Void,
         onResetLayout: @escaping () -> Void,
         onToggleCompactMode: @escaping () -> Void,
@@ -65,7 +65,7 @@ final class LaunchDeckStatusItemController: NSObject {
     @objc
     private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else {
-            onToggle()
+            onToggle(statusItemScreenRect())
             return
         }
 
@@ -75,8 +75,17 @@ final class LaunchDeckStatusItemController: NSObject {
             sender.performClick(nil)
             statusItem.menu = nil
         } else {
-            onToggle()
+            onToggle(statusItemScreenRect())
         }
+    }
+
+    private func statusItemScreenRect() -> NSRect? {
+        guard let button = statusItem.button,
+              let window = button.window
+        else {
+            return nil
+        }
+        return window.convertToScreen(button.frame)
     }
 
     @objc

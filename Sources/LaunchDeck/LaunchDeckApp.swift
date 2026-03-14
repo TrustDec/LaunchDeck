@@ -25,20 +25,18 @@ final class LaunchDeckAppDelegate: NSObject, NSApplicationDelegate {
         LaunchDeckDiagnostics.log("applicationDidFinishLaunching displayTarget=\(String(describing: displayTarget))")
         let controller = LaunchDeckShellWindowController(store: store, displayTarget: displayTarget)
         LaunchDeckDiagnostics.log("windowController initialized")
-        controller.showWindow(self)
-        LaunchDeckDiagnostics.log("showWindow dispatched")
-        controller.window?.makeKeyAndOrderFront(self)
-        NSApp.activate(ignoringOtherApps: true)
+        controller.toggleWindow(anchorRect: nil)
+        LaunchDeckDiagnostics.log("initial animated presentation dispatched")
         windowController = controller
         LaunchDeckHotKeyMonitor.shared.start { [weak controller] in
-            controller?.toggleWindow()
+            controller?.toggleWindow(anchorRect: nil)
         }
         LaunchDeckHotCornersMonitor.shared.start { [weak controller] in
-            controller?.toggleWindow()
+            controller?.toggleWindow(anchorRect: nil)
         }
         statusItemController = LaunchDeckStatusItemController(
-            onToggle: { [weak controller] in
-                controller?.toggleWindow()
+            onToggle: { [weak controller] anchorRect in
+                controller?.toggleWindow(anchorRect: anchorRect)
             },
             onReload: { [weak self] in
                 self?.store.reloadFromUI()
@@ -111,7 +109,7 @@ final class LaunchDeckAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc
     private func toggleLaunchDeckFromDockMenu() {
-        windowController?.toggleWindow()
+        windowController?.toggleWindow(anchorRect: nil)
     }
 
     @objc

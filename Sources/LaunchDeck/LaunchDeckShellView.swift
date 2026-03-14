@@ -1,17 +1,24 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 struct LaunchDeckShellView: View {
     @ObservedObject var store: LaunchDeckShellStore
     @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var folderTransitionNamespace
     @State private var pageColumns = 6
     @State private var pageRows = 5
-    @State private var renamingItem: LaunchItem?
-    @State private var renameDraft = ""
     @State private var pageDragOffset: CGFloat = 0
+    @State private var pageDragContainerWidth: CGFloat = 0
+    @State private var wallpaper: NSImage?
 
     private var metrics: ShellLayoutMetrics {
         store.compactMode ? .compact : .regular
+    }
+
+    private var pageDragProgress: CGFloat {
+        let denominator = max(pageDragContainerWidth * 0.42, 220)
+        return max(min(pageDragOffset / denominator, 1), -1)
     }
 
     var body: some View {
@@ -19,10 +26,13 @@ struct LaunchDeckShellView: View {
             ZStack {
                 backgroundAtmosphere
 
-                if store.selectedFolder != nil {
+                if store.selectedFolder != nil, !store.isSearching {
                     Color.black
                         .opacity(colorScheme == .dark ? 0.2 : 0.08)
                         .ignoresSafeArea()
+                        .onTapGesture {
+                            store.closeFolder()
+                        }
                         .transition(.opacity)
                 }
 
@@ -34,9 +44,11 @@ struct LaunchDeckShellView: View {
                         searchResultsGrid(in: proxy.size)
                     } else {
                         pageGrid(in: proxy.size)
-                            .offset(x: pageDragOffset)
+                            .scaleEffect(1 - abs(pageDragProgress) * 0.018)
+                            .opacity(1 - abs(pageDragProgress) * 0.08)
                             .gesture(pageDragGesture)
                         pageDots
+                            .opacity(1 - abs(pageDragProgress) * 0.15)
                     }
 
                     Spacer(minLength: 0)
@@ -45,17 +57,8 @@ struct LaunchDeckShellView: View {
                 .animation(.spring(response: 0.32, dampingFraction: 0.86), value: store.selectedFolder?.id)
                 .animation(.easeInOut(duration: 0.2), value: store.isSearching)
 
-                if store.isEditing && !store.isSearching {
-                    edgePagingDropZones
-                }
-
-                if store.isEditing {
-                    editModeBadge
-                        .padding(.top, 96)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
                 ShellPagingInputMonitor(
+                    isEnabled: !store.isSearching && store.selectedFolder == nil,
                     onPreviousPage: {
                         guard store.selectedFolder == nil else { return }
                         store.previousPage()
@@ -66,79 +69,96 @@ struct LaunchDeckShellView: View {
                     }
                 )
                 .allowsHitTesting(false)
+
+                SearchCommandMonitor(
+                    isEnabled: store.isSearching,
+                    onRevealSelectedResult: {
+                        store.revealSelectedSearchResultInFinder()
+                    }
+                )
+                .allowsHitTesting(false)
             }
             .task {
                 await store.loadIfNeeded()
             }
+            .onChange(of: store.query) { _, _ in
+                store.syncSearchSelection()
+            }
             .task(id: "\(Int(proxy.size.width))x\(Int(proxy.size.height))-\(store.compactMode)") {
-                let columns = max(min(Int((proxy.size.width - 120) / metrics.horizontalFootprint), 9), 5)
-                let rows = max(min(Int((proxy.size.height - 240) / metrics.verticalFootprint), 7), 4)
+                let minColumns = store.compactMode ? 6 : 7
+                let maxColumns = store.compactMode ? 11 : 10
+                let minRows = store.compactMode ? 4 : 5
+                let maxRows = store.compactMode ? 7 : 6
+                let columns = max(min(Int((proxy.size.width - 120) / metrics.horizontalFootprint), maxColumns), minColumns)
+                let rows = max(min(Int((proxy.size.height - 240) / metrics.verticalFootprint), maxRows), minRows)
                 pageColumns = columns
                 pageRows = rows
                 store.updatePageCapacity(columns * rows)
             }
             .onMoveCommand { direction in
-                guard store.selectedFolder == nil else { return }
-                switch direction {
-                case .left:
-                    store.previousPage()
-                case .right:
-                    store.nextPage()
-                default:
-                    break
+                if store.isSearching {
+                    switch direction {
+                    case .up:
+                        store.selectPreviousSearchResult()
+                    case .down:
+                        store.selectNextSearchResult()
+                    default:
+                        break
+                    }
+                } else {
+                    guard store.selectedFolder == nil else { return }
+                    switch direction {
+                    case .left:
+                        store.previousPage()
+                    case .right:
+                        store.nextPage()
+                    default:
+                        break
+                    }
                 }
             }
             .onExitCommand {
                 store.handleExitCommand()
-            }
-            .sheet(item: $renamingItem) { item in
-                renameSheet(for: item)
             }
         }
     }
 
     private var backgroundAtmosphere: some View {
         ZStack {
-            LinearGradient(
-                colors: colorScheme == .dark
-                    ? [Color(nsColor: .windowBackgroundColor), Color(nsColor: .underPageBackgroundColor)]
-                    : [Color(nsColor: .windowBackgroundColor), Color(nsColor: .controlBackgroundColor)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            Color.black
 
-            RadialGradient(
-                colors: [
-                    Color(nsColor: .controlAccentColor).opacity(colorScheme == .dark ? 0.17 : 0.12),
-                    .clear,
-                ],
-                center: .topLeading,
-                startRadius: 40,
-                endRadius: 520
-            )
-            .blendMode(.plusLighter)
-
-            RadialGradient(
-                colors: [
-                    Color.white.opacity(colorScheme == .dark ? 0.08 : 0.14),
-                    .clear,
-                ],
-                center: .bottomTrailing,
-                startRadius: 20,
-                endRadius: 460
-            )
+            if let wallpaper {
+                Image(nsImage: wallpaper)
+                    .resizable()
+                    .scaledToFill()
+                    .saturation(1.04)
+                    .blur(radius: 20)
+                    .overlay(Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08))
+                    .transition(.opacity)
+            } else {
+                LinearGradient(
+                    colors: colorScheme == .dark
+                        ? [Color(nsColor: .windowBackgroundColor), Color(nsColor: .underPageBackgroundColor)]
+                        : [Color(nsColor: .windowBackgroundColor), Color(nsColor: .controlBackgroundColor)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
 
             LinearGradient(
                 colors: [
-                    Color.white.opacity(colorScheme == .dark ? 0.02 : 0.06),
+                    Color.white.opacity(colorScheme == .dark ? 0.02 : 0.05),
                     Color.clear,
-                    Color.black.opacity(colorScheme == .dark ? 0.18 : 0.05),
+                    Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
         }
         .ignoresSafeArea()
+        .task(id: colorScheme == .dark) {
+            wallpaper = await DesktopWallpaperLoader.loadAsync()
+        }
     }
 
     private func searchResultsGrid(in size: CGSize) -> some View {
@@ -151,24 +171,51 @@ struct LaunchDeckShellView: View {
                         store.activate(item)
                     } label: {
                         VStack(spacing: 10) {
-                            ShellIconTile(item: item, isActive: item.id == store.selectedFolder?.id, isEditing: store.isEditing, metrics: metrics)
+                            ShellIconTile(
+                                item: item,
+                                isActive: item.id == store.selectedFolder?.id,
+                                metrics: metrics,
+                                namespace: folderTransitionNamespace,
+                                expandedFolderID: store.selectedFolder?.id
+                            )
 
-                            Text(item.title)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(Color(nsColor: .labelColor))
-                                .lineLimit(1)
-                                .frame(width: metrics.labelWidth)
+                            VStack(spacing: 3) {
+                                SearchHighlightedTitle(
+                                    title: item.title,
+                                    query: store.query,
+                                    width: metrics.labelWidth,
+                                    fontSize: 13,
+                                    fontWeight: .medium,
+                                    foregroundColor: Color(nsColor: .labelColor),
+                                    highlightColor: Color(nsColor: .controlAccentColor)
+                                )
+
+                                if let subtitle = searchResultSubtitle(for: item) {
+                                    SearchHighlightedTitle(
+                                        title: subtitle,
+                                        query: store.query,
+                                        width: metrics.labelWidth,
+                                        fontSize: 11,
+                                        fontWeight: .regular,
+                                        foregroundColor: Color(nsColor: .secondaryLabelColor),
+                                        highlightColor: Color(nsColor: .controlAccentColor).opacity(0.92)
+                                    )
+                                }
+                            }
                         }
                     }
                     .buttonStyle(.plain)
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.45)
-                            .onEnded { _ in
-                                store.setEditing(true)
-                            }
-                    )
-                    .contextMenu {
-                        itemContextMenu(for: item, isTopLevel: true)
+                    .background {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color(nsColor: .controlAccentColor).opacity(store.selectedSearchResultID == item.id ? (colorScheme == .dark ? 0.18 : 0.14) : 0))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color(nsColor: .controlAccentColor).opacity(store.selectedSearchResultID == item.id ? 0.5 : 0), lineWidth: 1)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .onTapGesture {
+                        store.selectedSearchResultID = item.id
                     }
                 }
             }
@@ -193,178 +240,228 @@ struct LaunchDeckShellView: View {
         .transition(.opacity.combined(with: .scale(scale: 0.985)))
     }
 
+    private func searchResultSubtitle(for item: LaunchItem) -> String? {
+        if let subtitle = item.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !subtitle.isEmpty {
+            return subtitle
+        }
+
+        guard let bundleURL = item.bundleURL else {
+            return item.isFolder ? "Folder" : nil
+        }
+
+        let path = bundleURL.path
+        if path.hasPrefix("/System/Applications") {
+            return "System App"
+        }
+        if path.hasPrefix("/Applications") {
+            return "Applications"
+        }
+        if path.hasPrefix(NSHomeDirectory()) {
+            return "Home"
+        }
+        return bundleURL.deletingLastPathComponent().lastPathComponent
+    }
+
     private var topBar: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
 
-                TextField("Search apps", text: $store.query)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(Color(nsColor: .labelColor))
-                    .onSubmit {
-                        if let item = store.primarySearchResult {
-                            store.activate(item)
+                    TextField("Search apps", text: $store.query)
+                        .textFieldStyle(.plain)
+                        .foregroundStyle(Color(nsColor: .labelColor))
+                        .onSubmit {
+                            if let item = store.primarySearchResult {
+                                store.activate(item)
+                            }
                         }
-                    }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-            .background {
-                SystemGlassSurface(cornerRadius: 18, style: .regular)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-            if store.isEditing {
-                Button("Done") {
-                    store.setEditing(false)
                 }
-                .buttonStyle(.plain)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .labelColor))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
                 .background {
                     SystemGlassSurface(cornerRadius: 18, style: .regular)
                 }
-                .clipShape(Capsule())
-            } else {
-                Button("Edit") {
-                    store.setEditing(true)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                Button {
+                    NSApp.keyWindow?.close()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                        .frame(width: 36, height: 36)
+                        .background {
+                            SystemGlassSurface(cornerRadius: 18, style: .regular)
+                        }
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .labelColor))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
-                .background {
-                    SystemGlassSurface(cornerRadius: 18, style: .regular)
-                }
-                .clipShape(Capsule())
             }
 
-            Button {
-                NSApp.keyWindow?.close()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                    .frame(width: 36, height: 36)
-                    .background {
-                        SystemGlassSurface(cornerRadius: 18, style: .regular)
+            if store.isSearching, let selectedItem = store.primarySearchResult {
+                HStack(spacing: 10) {
+                    Text(selectedItem.title)
+                        .foregroundStyle(Color(nsColor: .labelColor))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        store.activate(selectedItem)
+                    } label: {
+                        searchQuickActionLabel("Open", keyHint: "Return")
                     }
-                    .clipShape(Circle())
+                    .buttonStyle(.plain)
+
+                    Button {
+                        store.revealInFinder(selectedItem)
+                    } label: {
+                        searchQuickActionLabel("Reveal", keyHint: "⌘ Return")
+                    }
+                    .buttonStyle(.plain)
+
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 8)
+                .transition(.opacity)
             }
-            .buttonStyle(.plain)
         }
         .frame(maxWidth: 720)
     }
 
-    private var editModeBadge: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 13, weight: .semibold))
-            Text("Editing Layout")
-                .font(.system(size: 12, weight: .semibold))
+    private func searchQuickActionLabel(_ title: String, keyHint: String) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Text(keyHint)
+                .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
         }
-        .foregroundStyle(Color(nsColor: .labelColor))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background {
-            SystemGlassSurface(cornerRadius: 16, style: .regular)
+            SystemGlassSurface(cornerRadius: 12, style: .clear)
         }
-        .clipShape(Capsule())
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : 0.06), radius: 18, y: 10)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func pageGrid(in size: CGSize) -> some View {
-        let rows = store.visibleItems.chunked(into: pageColumns)
-        let rowHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * metrics.rowSpacing
-        let selectedFolderID = store.selectedFolder?.id
+        let contentWidth = max(size.width - 72, 320)
+        let _ = updatePageDragContainerWidth(contentWidth)
+        let pageWidth = contentWidth
+        let pageIndices = visiblePageIndices()
 
         return ZStack {
-            VStack(alignment: .center, spacing: metrics.rowSpacing - 6) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, rowItems in
-                    VStack(spacing: 18) {
-                        HStack(alignment: .top, spacing: metrics.columnSpacing) {
-                            ForEach(rowItems) { item in
-                                Button {
-                                    store.activate(item)
-                                } label: {
-                                    VStack(spacing: 10) {
-                                        ShellIconTile(item: item, isActive: item.id == selectedFolderID, isEditing: store.isEditing, metrics: metrics)
-
-                                        Text(item.title)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(Color(nsColor: .labelColor))
-                                            .lineLimit(1)
-                                            .frame(width: metrics.labelWidth)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .simultaneousGesture(
-                                    LongPressGesture(minimumDuration: 0.45)
-                                        .onEnded { _ in
-                                            store.setEditing(true)
-                                        }
-                                )
-                                .applyIf(store.isEditing) { view in
-                                    view.draggable(item.id.uuidString) {
-                                        Color.clear.frame(width: 1, height: 1)
-                                    }
-                                }
-                                .applyIf(store.isEditing) { view in
-                                    view.dropDestination(for: String.self) { items, _ in
-                                        guard let draggedID = items.first.flatMap(UUID.init(uuidString:)) else {
-                                            return false
-                                        }
-                                        store.handleTopLevelDrop(draggedID: draggedID, onto: item.id)
-                                        return true
-                                    }
-                                }
-                                .contextMenu {
-                                    itemContextMenu(for: item, isTopLevel: true)
-                                }
-                            }
-
-                            ForEach(rowItems.count..<pageColumns, id: \.self) { _ in
-                                Color.clear
-                                    .frame(width: metrics.labelWidth, height: metrics.cellHeight)
-                            }
-                        }
-
-                        if let folder = selectedFolder(in: rowItems) {
-                            folderPanel(for: folder)
-                                .transition(.asymmetric(
-                                    insertion: .scale(scale: 0.96).combined(with: .opacity),
-                                    removal: .scale(scale: 0.98).combined(with: .opacity)
-                                ))
-                        }
-                    }
+            HStack(spacing: 0) {
+                ForEach(pageIndices, id: \.self) { page in
+                    pageContent(page: page)
+                        .frame(width: pageWidth)
                 }
             }
-            .frame(maxWidth: .infinity)
-            .frame(minHeight: rowHeight, alignment: .top)
-            .padding(.top, 8)
-            .animation(.spring(response: 0.28, dampingFraction: 0.86), value: selectedFolderID)
+            .offset(x: (-CGFloat(pageIndices.first ?? store.currentPage) * pageWidth) + pageDragOffset)
+            .animation(.spring(response: 0.28, dampingFraction: 0.86), value: store.selectedFolder?.id)
         }
+        .frame(width: contentWidth, alignment: .leading)
+        .overlay(alignment: pageDragProgress > 0 ? .leading : .trailing) {
+            if abs(pageDragProgress) > 0.02 {
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(colorScheme == .dark ? 0.12 : 0.1),
+                        Color.clear,
+                    ],
+                    startPoint: pageDragProgress > 0 ? .leading : .trailing,
+                    endPoint: pageDragProgress > 0 ? .trailing : .leading
+                )
+                .frame(width: 120)
+                .blur(radius: 18)
+                .opacity(abs(pageDragProgress))
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func visiblePageIndices() -> [Int] {
+        let lower = max(store.currentPage - 1, 0)
+        let upper = min(store.currentPage + 1, max(store.pageCount - 1, 0))
+        return Array(lower...upper)
+    }
+
+    private func pageContent(page: Int) -> some View {
+        let items = store.pagedItems[min(max(page, 0), max(store.pageCount - 1, 0))]
+        let rows = items.chunked(into: pageColumns)
+        let rowHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * metrics.rowSpacing
+        let selectedFolderID = page == store.currentPage ? store.selectedFolder?.id : nil
+        let baseIndex = page * max(store.pageSize, 1)
+
+        return VStack(alignment: .center, spacing: metrics.rowSpacing - 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowItems in
+                let rowContainsSelectedFolder = selectedFolderID != nil && rowItems.contains(where: { $0.id == selectedFolderID })
+                VStack(spacing: 18) {
+                    HStack(alignment: .top, spacing: metrics.columnSpacing) {
+                        ForEach(Array(rowItems.enumerated()), id: \.element.id) { _, item in
+                            Button {
+                                store.activate(item)
+                            } label: {
+                                VStack(spacing: 10) {
+                                    ShellIconTile(
+                                        item: item,
+                                        isActive: item.id == selectedFolderID,
+                                        metrics: metrics,
+                                        namespace: folderTransitionNamespace,
+                                        expandedFolderID: store.selectedFolder?.id
+                                    )
+
+                                    Text(item.title)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(Color(nsColor: .labelColor))
+                                        .lineLimit(1)
+                                        .frame(width: metrics.labelWidth)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        ForEach(rowItems.count..<pageColumns, id: \.self) { emptyColumn in
+                            let absoluteIndex = baseIndex + rowIndex * pageColumns + emptyColumn
+                            emptyDropSlot(at: absoluteIndex)
+                        }
+                    }
+
+                    if let folder = selectedFolder(in: rowItems), page == store.currentPage {
+                        folderPanel(for: folder)
+                            .transition(.asymmetric(
+                                insertion: .offset(y: -12).combined(with: .scale(scale: 0.975, anchor: .top)).combined(with: .opacity),
+                                removal: .offset(y: -6).combined(with: .scale(scale: 0.988, anchor: .top)).combined(with: .opacity)
+                            ))
+                    }
+                }
+                .scaleEffect(selectedFolderID == nil ? 1 : (rowContainsSelectedFolder ? 1 : 0.972), anchor: .top)
+                .opacity(selectedFolderID == nil ? 1 : (rowContainsSelectedFolder ? 1 : 0.28))
+                .blur(radius: selectedFolderID == nil ? 0 : (rowContainsSelectedFolder ? 0 : 7))
+                .zIndex(rowContainsSelectedFolder ? 2 : 0)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: rowHeight, alignment: .top)
+        .padding(.top, 8)
     }
 
     private var pageDragGesture: some Gesture {
         DragGesture(minimumDistance: 10, coordinateSpace: .local)
             .onChanged { value in
                 guard abs(value.translation.width) > abs(value.translation.height),
-                      store.selectedFolder == nil,
-                      !store.isEditing
+                      store.selectedFolder == nil
                 else {
                     return
                 }
-                pageDragOffset = value.translation.width
+                pageDragOffset = adjustedPageDragOffset(for: value.translation.width)
             }
             .onEnded { value in
                 guard abs(value.translation.width) > abs(value.translation.height),
-                      store.selectedFolder == nil,
-                      !store.isEditing
+                      store.selectedFolder == nil
                 else {
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
                         pageDragOffset = 0
@@ -372,11 +469,15 @@ struct LaunchDeckShellView: View {
                     return
                 }
 
-                let threshold: CGFloat = 90
+                let threshold = min(max(pageDragContainerWidth * 0.16, 80), 160)
+                let predicted = value.predictedEndTranslation.width
+                let effectiveTranslation = adjustedPageDragOffset(
+                    for: abs(predicted) > abs(value.translation.width) ? predicted : value.translation.width
+                )
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                    if value.translation.width > threshold {
+                    if effectiveTranslation > threshold {
                         store.previousPage()
-                    } else if value.translation.width < -threshold {
+                    } else if effectiveTranslation < -threshold {
                         store.nextPage()
                     }
                     pageDragOffset = 0
@@ -384,35 +485,31 @@ struct LaunchDeckShellView: View {
             }
     }
 
-    private var edgePagingDropZones: some View {
-        HStack {
-            edgeDropZone(direction: .left)
-            Spacer()
-            edgeDropZone(direction: .right)
+    @discardableResult
+    private func updatePageDragContainerWidth(_ width: CGFloat) -> CGFloat {
+        if abs(pageDragContainerWidth - width) > 1 {
+            DispatchQueue.main.async {
+                pageDragContainerWidth = width
+            }
         }
-        .padding(.horizontal, 8)
+        return width
     }
 
-    private func edgeDropZone(direction: MoveCommandDirection) -> some View {
+    private func adjustedPageDragOffset(for translation: CGFloat) -> CGFloat {
+        let clampedBase = max(min(translation, pageDragContainerWidth * 0.72), -pageDragContainerWidth * 0.72)
+        let isPullingPastLeadingEdge = store.currentPage == 0 && clampedBase > 0
+        let isPullingPastTrailingEdge = store.currentPage >= max(store.pageCount - 1, 0) && clampedBase < 0
+        guard isPullingPastLeadingEdge || isPullingPastTrailingEdge else {
+            return clampedBase
+        }
+        return clampedBase * 0.34
+    }
+
+    private func emptyDropSlot(at absoluteIndex: Int) -> some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
             .fill(Color.clear)
-            .frame(width: 36)
+            .frame(width: metrics.labelWidth, height: metrics.cellHeight)
             .contentShape(Rectangle())
-            .dropDestination(for: String.self) { items, _ in
-                guard let draggedID = items.first.flatMap(UUID.init(uuidString:)) else {
-                    return false
-                }
-
-                switch direction {
-                case .left:
-                    store.moveTopLevelItem(id: draggedID, pageDelta: -1)
-                case .right:
-                    store.moveTopLevelItem(id: draggedID, pageDelta: 1)
-                default:
-                    return false
-                }
-                return true
-            }
     }
 
     private var pageDots: some View {
@@ -422,19 +519,10 @@ struct LaunchDeckShellView: View {
                     store.selectPage(page)
                 } label: {
                     Capsule()
-                        .fill(Color(nsColor: .labelColor).opacity(page == store.currentPage ? 0.92 : 0.22))
-                        .frame(width: page == store.currentPage ? 18 : 8, height: 8)
+                        .fill(Color(nsColor: .labelColor).opacity(pageDotOpacity(for: page)))
+                        .frame(width: pageDotWidth(for: page), height: 8)
                 }
                 .buttonStyle(.plain)
-                .applyIf(store.isEditing) { view in
-                    view.dropDestination(for: String.self) { items, _ in
-                        guard let draggedID = items.first.flatMap(UUID.init(uuidString:)) else {
-                            return false
-                        }
-                        store.moveTopLevelItem(id: draggedID, toPage: page)
-                        return true
-                    }
-                }
             }
         }
         .padding(.horizontal, 18)
@@ -443,6 +531,39 @@ struct LaunchDeckShellView: View {
             SystemGlassSurface(cornerRadius: 18, style: .regular)
         }
         .clipShape(Capsule())
+    }
+
+    private func pageDotWidth(for page: Int) -> CGFloat {
+        let progress = abs(pageDragProgress)
+        let targetPage = projectedAdjacentPage()
+        if page == store.currentPage {
+            return 18 - (10 * progress)
+        }
+        if page == targetPage {
+            return 8 + (10 * progress)
+        }
+        return 8
+    }
+
+    private func pageDotOpacity(for page: Int) -> CGFloat {
+        let progress = abs(pageDragProgress)
+        let targetPage = projectedAdjacentPage()
+        if page == store.currentPage {
+            return 0.92 - (0.42 * progress)
+        }
+        if page == targetPage {
+            return 0.22 + (0.52 * progress)
+        }
+        return 0.22
+    }
+
+    private func projectedAdjacentPage() -> Int? {
+        guard abs(pageDragProgress) > 0.01 else {
+            return nil
+        }
+        let candidate = pageDragProgress < 0 ? store.currentPage + 1 : store.currentPage - 1
+        let clamped = min(max(candidate, 0), max(store.pageCount - 1, 0))
+        return clamped == store.currentPage ? nil : clamped
     }
 
     private func folderPanel(for folder: LaunchItem) -> some View {
@@ -456,9 +577,14 @@ struct LaunchDeckShellView: View {
         let gridHeight = CGFloat(rows) * (tileSize + 28) + CGFloat(max(rows - 1, 0)) * verticalSpacing
 
         return VStack(spacing: 24) {
-            Text(folder.title)
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .labelColor))
+            HStack(spacing: 12) {
+                Text(folder.title)
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+            }
+            .frame(width: gridWidth, alignment: .leading)
 
             let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: horizontalSpacing), count: columns)
 
@@ -468,7 +594,13 @@ struct LaunchDeckShellView: View {
                         store.activate(child)
                     } label: {
                         VStack(spacing: 10) {
-                            ShellIconTile(item: child, isActive: false, isEditing: store.isEditing, metrics: metrics)
+                            ShellIconTile(
+                                item: child,
+                                isActive: false,
+                                metrics: metrics,
+                                namespace: folderTransitionNamespace,
+                                expandedFolderID: store.selectedFolder?.id
+                            )
 
                             Text(child.title)
                                 .font(.system(size: 13, weight: .medium))
@@ -478,29 +610,6 @@ struct LaunchDeckShellView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.45)
-                            .onEnded { _ in
-                                store.setEditing(true)
-                            }
-                    )
-                    .applyIf(store.isEditing) { view in
-                        view.draggable(child.id.uuidString) {
-                            Color.clear.frame(width: 1, height: 1)
-                        }
-                    }
-                    .applyIf(store.isEditing) { view in
-                        view.dropDestination(for: String.self) { items, _ in
-                            guard let draggedID = items.first.flatMap(UUID.init(uuidString:)) else {
-                                return false
-                            }
-                            store.reorderItemWithinFolder(draggedID: draggedID, targetID: child.id, folderID: folder.id)
-                            return true
-                        }
-                    }
-                    .contextMenu {
-                        itemContextMenu(for: child, isTopLevel: false)
-                    }
                 }
             }
             .frame(width: gridWidth, height: gridHeight, alignment: .top)
@@ -525,6 +634,7 @@ struct LaunchDeckShellView: View {
             SystemGlassSurface(cornerRadius: 30, style: .regular)
         }
         .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .matchedGeometryEffect(id: "folder-surface-\(folder.id.uuidString)", in: folderTransitionNamespace, properties: .frame, anchor: .center, isSource: false)
         .overlay {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .stroke(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.22), lineWidth: 1)
@@ -540,79 +650,57 @@ struct LaunchDeckShellView: View {
         return rowItems.first(where: { $0.id == selectedFolder.id })
     }
 
-    @ViewBuilder
-    private func itemContextMenu(for item: LaunchItem, isTopLevel: Bool) -> some View {
-        Button("Rename") {
-            renameDraft = item.title
-            renamingItem = item
-        }
+}
 
-        Button(item.isFolder ? "Hide Folder" : "Hide App") {
-            store.hideItem(id: item.id)
-        }
-
-        if item.isFolder {
-            Divider()
-
-            Button("Dissolve Folder") {
-                store.dissolveFolder(id: item.id)
-            }
-        }
-
-        if isTopLevel {
-            Divider()
-
-            Button("Move To Previous Page") {
-                store.moveTopLevelItem(id: item.id, pageDelta: -1)
-            }
-
-            Button("Move To Next Page") {
-                store.moveTopLevelItem(id: item.id, pageDelta: 1)
-            }
-        } else {
-            Divider()
-
-            Button("Move Out of Folder") {
-                store.ungroupItem(id: item.id)
-            }
-        }
+private enum DesktopWallpaperLoader {
+    static func loadAsync() async -> NSImage? {
+        await Task.detached(priority: .utility) {
+            load()
+        }.value
     }
 
-    private func renameSheet(for item: LaunchItem) -> some View {
-        VStack(spacing: 20) {
-            Text(item.isFolder ? "Rename Folder" : "Rename App")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .labelColor))
-
-            TextField("Name", text: $renameDraft)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 320)
-
-            HStack(spacing: 12) {
-                Button("Cancel") {
-                    renamingItem = nil
-                    renameDraft = ""
-                }
-
-                Button("Save") {
-                    store.renameItem(id: item.id, title: renameDraft)
-                    renamingItem = nil
-                    renameDraft = ""
-                }
-                .keyboardShortcut(.defaultAction)
-            }
+    static func load() -> NSImage? {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first,
+              let url = NSWorkspace.shared.desktopImageURL(for: screen) else {
+            return nil
         }
-        .padding(28)
-        .frame(width: 380)
-        .background(Color(nsColor: .windowBackgroundColor))
+
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]),
+              values.isDirectory != true else {
+            return nil
+        }
+
+        let pixelScale = max(screen.backingScaleFactor, 1)
+        let maxDimension = max(screen.frame.width, screen.frame.height) * pixelScale
+        return downsampledImage(at: url, maxPixelSize: min(maxDimension, 2560))
+    }
+
+    private static func downsampledImage(at url: URL, maxPixelSize: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return NSImage(contentsOf: url)
+        }
+
+        let options: CFDictionary = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(max(maxPixelSize, 1024)),
+        ] as CFDictionary
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else {
+            return NSImage(contentsOf: url)
+        }
+
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 }
 
 private struct ShellIconTile: View {
     let item: LaunchItem
     let isActive: Bool
-    let isEditing: Bool
     let metrics: ShellLayoutMetrics
+    let namespace: Namespace.ID
+    let expandedFolderID: UUID?
     @State private var icon: NSImage?
 
     var body: some View {
@@ -624,6 +712,13 @@ private struct ShellIconTile: View {
                         SystemGlassSurface(cornerRadius: 22, style: .regular)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .matchedGeometryEffect(
+                        id: "folder-surface-\(item.id.uuidString)",
+                        in: namespace,
+                        properties: .frame,
+                        anchor: .center,
+                        isSource: expandedFolderID != item.id
+                    )
 
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(24), spacing: 4), count: 2), spacing: 4) {
                     ForEach(Array(item.children.prefix(4).enumerated()), id: \.offset) { _, child in
@@ -647,8 +742,6 @@ private struct ShellIconTile: View {
             RoundedRectangle(cornerRadius: item.isFolder ? metrics.folderCornerRadius : metrics.iconCornerRadius, style: .continuous)
                 .stroke(Color(nsColor: .controlAccentColor).opacity(isActive ? 0.7 : 0), lineWidth: 1.5)
         }
-        .scaleEffect(isEditing ? 0.985 : 1)
-        .animation(.easeOut(duration: 0.16), value: isEditing)
         .task(id: item.id) {
             guard !item.isFolder, let bundleURL = item.bundleURL else { return }
             icon = NSWorkspace.shared.icon(forFile: bundleURL.path)
@@ -678,6 +771,115 @@ private struct MiniShellIcon: View {
     }
 }
 
+private struct SearchHighlightedTitle: View {
+    let title: String
+    let query: String
+    let width: CGFloat
+    let fontSize: CGFloat
+    let fontWeight: Font.Weight
+    let foregroundColor: Color
+    let highlightColor: Color
+
+    var body: some View {
+        Text(attributedTitle)
+            .font(.system(size: fontSize, weight: fontWeight))
+            .lineLimit(1)
+            .frame(width: width)
+    }
+
+    private var attributedTitle: AttributedString {
+        var attributed = AttributedString(title)
+        attributed.foregroundColor = foregroundColor
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return attributed
+        }
+
+        let lowerTitle = title.lowercased()
+        let lowerQuery = trimmedQuery.lowercased()
+
+        if let range = lowerTitle.range(of: lowerQuery) {
+            let start = title.distance(from: title.startIndex, to: range.lowerBound)
+            let end = title.distance(from: title.startIndex, to: range.upperBound)
+            if let attributedRange = Range(NSRange(location: start, length: end - start), in: attributed) {
+                attributed[attributedRange].foregroundColor = highlightColor
+                attributed[attributedRange].font = .system(size: fontSize, weight: .semibold)
+            }
+        }
+        return attributed
+    }
+}
+
+private struct SearchCommandMonitor: NSViewRepresentable {
+    let isEnabled: Bool
+    let onRevealSelectedResult: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onRevealSelectedResult: onRevealSelectedResult)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.install(isEnabled: isEnabled)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onRevealSelectedResult = onRevealSelectedResult
+        context.coordinator.install(isEnabled: isEnabled)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var onRevealSelectedResult: () -> Void
+        private var monitor: Any?
+        private var isInstalled = false
+
+        init(onRevealSelectedResult: @escaping () -> Void) {
+            self.onRevealSelectedResult = onRevealSelectedResult
+        }
+
+        func install(isEnabled: Bool) {
+            guard isEnabled else {
+                uninstall()
+                return
+            }
+
+            guard !isInstalled else {
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                let isReturn = event.keyCode == 36 || event.keyCode == 76
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                if isReturn, flags == .command {
+                    onRevealSelectedResult()
+                    return nil
+                }
+
+                return event
+            }
+            isInstalled = true
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+            isInstalled = false
+        }
+
+        deinit {
+            uninstall()
+        }
+    }
+}
+
 private struct ShellLayoutMetrics {
     let iconFrame: CGFloat
     let labelWidth: CGFloat
@@ -697,24 +899,24 @@ private struct ShellLayoutMetrics {
     }
 
     static let regular = ShellLayoutMetrics(
-        iconFrame: 78,
-        labelWidth: 108,
-        cellHeight: 108,
-        columnSpacing: 28,
-        rowSpacing: 30,
-        folderTileSize: 92,
-        iconCornerRadius: 20,
+        iconFrame: 96,
+        labelWidth: 120,
+        cellHeight: 132,
+        columnSpacing: 34,
+        rowSpacing: 34,
+        folderTileSize: 96,
+        iconCornerRadius: 22,
         folderCornerRadius: 22
     )
 
     static let compact = ShellLayoutMetrics(
-        iconFrame: 64,
-        labelWidth: 92,
-        cellHeight: 92,
-        columnSpacing: 22,
-        rowSpacing: 24,
-        folderTileSize: 84,
-        iconCornerRadius: 18,
+        iconFrame: 74,
+        labelWidth: 100,
+        cellHeight: 106,
+        columnSpacing: 24,
+        rowSpacing: 26,
+        folderTileSize: 86,
+        iconCornerRadius: 20,
         folderCornerRadius: 20
     )
 }
@@ -758,44 +960,95 @@ private struct AppIconImageView: NSViewRepresentable {
 }
 
 private struct ShellPagingInputMonitor: NSViewRepresentable {
+    let isEnabled: Bool
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
 
-    func makeNSView(context: Context) -> ShellPagingInputView {
-        let view = ShellPagingInputView()
-        view.onPreviousPage = onPreviousPage
-        view.onNextPage = onNextPage
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPreviousPage: onPreviousPage, onNextPage: onNextPage)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.install(isEnabled: isEnabled)
         return view
     }
 
-    func updateNSView(_ nsView: ShellPagingInputView, context: Context) {
-        nsView.onPreviousPage = onPreviousPage
-        nsView.onNextPage = onNextPage
-    }
-}
-
-private final class ShellPagingInputView: NSView {
-    var onPreviousPage: (() -> Void)?
-    var onNextPage: (() -> Void)?
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onPreviousPage = onPreviousPage
+        context.coordinator.onNextPage = onNextPage
+        context.coordinator.install(isEnabled: isEnabled)
     }
 
-    override func scrollWheel(with event: NSEvent) {
-        let deltaX = event.scrollingDeltaX
-        let deltaY = event.scrollingDeltaY
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
 
-        if abs(deltaX) >= abs(deltaY), abs(deltaX) > 4 {
-            deltaX > 0 ? onNextPage?() : onPreviousPage?()
-            return
+    final class Coordinator {
+        var onPreviousPage: () -> Void
+        var onNextPage: () -> Void
+        private var monitor: Any?
+        private var isInstalled = false
+        private var lastTriggerTime: TimeInterval = 0
+
+        init(
+            onPreviousPage: @escaping () -> Void,
+            onNextPage: @escaping () -> Void
+        ) {
+            self.onPreviousPage = onPreviousPage
+            self.onNextPage = onNextPage
         }
 
-        guard abs(deltaY) > 4 else {
-            return
+        func install(isEnabled: Bool) {
+            guard isEnabled else {
+                uninstall()
+                return
+            }
+
+            guard !isInstalled else {
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self else { return event }
+                guard event.window != nil else { return event }
+
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - lastTriggerTime < 0.22 {
+                    return event
+                }
+
+                let deltaX = event.scrollingDeltaX
+                let deltaY = event.scrollingDeltaY
+
+                if abs(deltaX) >= abs(deltaY), abs(deltaX) > 3 {
+                    lastTriggerTime = now
+                    deltaX > 0 ? onNextPage() : onPreviousPage()
+                    return nil
+                }
+
+                guard abs(deltaY) > 3 else {
+                    return event
+                }
+
+                lastTriggerTime = now
+                deltaY > 0 ? onNextPage() : onPreviousPage()
+                return nil
+            }
+            isInstalled = true
         }
 
-        deltaY > 0 ? onNextPage?() : onPreviousPage?()
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+            isInstalled = false
+        }
+
+        deinit {
+            uninstall()
+        }
     }
 }
 

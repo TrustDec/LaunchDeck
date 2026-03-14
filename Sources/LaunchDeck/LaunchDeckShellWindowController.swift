@@ -37,8 +37,9 @@ final class LaunchDeckShellWindowController: NSWindowController {
         nil
     }
 
-    func toggleWindow() {
+    func toggleWindow(anchorRect: NSRect? = nil) {
         guard let window else { return }
+        _ = anchorRect
 
         if window.isVisible {
             animateOut(window: window)
@@ -53,12 +54,13 @@ final class LaunchDeckShellWindowController: NSWindowController {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        let finalFrame = window.frame
-        let insetFrame = finalFrame.insetBy(dx: 42, dy: 24)
-        window.setFrame(insetFrame, display: true)
+        let finalFrame = displayTarget.resolve()?.frame ?? window.frame
+        let startFrame = finalFrame.insetBy(dx: finalFrame.width * 0.018, dy: finalFrame.height * 0.028)
+        window.setFrame(startFrame, display: true)
+        window.contentView?.alphaValue = 1
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
+            context.duration = 0.22
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
             window.animator().setFrame(finalFrame, display: true)
@@ -67,11 +69,11 @@ final class LaunchDeckShellWindowController: NSWindowController {
 
     private func animateOut(window: NSWindow) {
         let currentFrame = window.frame
-        let targetFrame = currentFrame.insetBy(dx: 42, dy: 24)
+        let targetFrame = currentFrame.insetBy(dx: currentFrame.width * 0.015, dy: currentFrame.height * 0.022)
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.16
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
             window.animator().setFrame(targetFrame, display: true)
         }, completionHandler: {
@@ -88,7 +90,15 @@ final class LaunchDeckShellWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    override func close() {
+        if isVisible, let controller = windowController as? LaunchDeckShellWindowController {
+            controller.toggleWindow(anchorRect: nil)
+            return
+        }
+        super.close()
+    }
+
     override func cancelOperation(_ sender: Any?) {
-        orderOut(sender)
+        close()
     }
 }

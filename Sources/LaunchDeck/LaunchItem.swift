@@ -39,6 +39,41 @@ struct LaunchItem: Identifiable, Hashable, Sendable {
             .lowercased()
     }
 
+    func searchScore(for query: String, recentBundlePaths: [String]) -> LaunchDeckSearchMatchScore? {
+        let normalizedTitle = title.lowercased()
+        let normalizedSubtitle = subtitle?.lowercased() ?? ""
+        let childMatches = children.filter { $0.title.lowercased().contains(query) }.count
+
+        let titlePrefix = normalizedTitle.hasPrefix(query) ? 3 : 0
+        let titleContains = normalizedTitle.contains(query) ? 2 : 0
+        let subtitleContains = normalizedSubtitle.contains(query) ? 1 : 0
+        let childContains = childMatches > 0 ? 1 : 0
+
+        guard titlePrefix > 0 || titleContains > 0 || subtitleContains > 0 || childContains > 0 else {
+            return nil
+        }
+
+        let isSystemApp = bundleURL?.path.hasPrefix("/System/Applications") == true ? 1 : 0
+        let recentLaunchBonus: Int
+        if let bundlePath = bundleURL?.path,
+           let recentIndex = recentBundlePaths.firstIndex(of: bundlePath) {
+            recentLaunchBonus = max(0, 4 - recentIndex)
+        } else {
+            recentLaunchBonus = 0
+        }
+        let titleLengthBias = max(0, 40 - normalizedTitle.count)
+
+        return LaunchDeckSearchMatchScore(
+            titlePrefix: titlePrefix,
+            titleContains: titleContains,
+            subtitleContains: subtitleContains,
+            childContains: childContains,
+            recentLaunchBonus: recentLaunchBonus,
+            systemAppBonus: isSystemApp,
+            titleLengthBias: titleLengthBias
+        )
+    }
+
     static func app(
         title: String,
         subtitle: String? = nil,
