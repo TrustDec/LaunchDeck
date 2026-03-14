@@ -205,7 +205,7 @@ final class LaunchDeckPersistenceController {
                 title: item.title,
                 subtitle: item.subtitle,
                 kind: item.kind.rawValue,
-                bundlePath: item.bundleURL?.path(),
+                bundlePath: item.bundleURL?.path,
                 orderIndex: Int64(index)
             )
 
@@ -221,10 +221,18 @@ final class LaunchDeckPersistenceController {
                 title: entry.title,
                 subtitle: entry.subtitle,
                 kind: LaunchItem.Kind(rawValue: entry.kind) ?? .app,
-                bundleURL: entry.bundlePath.map(URL.init(fileURLWithPath:)),
+                bundleURL: decodeBundleURL(from: entry.bundlePath),
                 children: materialize(parentID: entry.id, entriesByParent: entriesByParent)
             )
         }
+    }
+
+    private func decodeBundleURL(from storedPath: String?) -> URL? {
+        guard let storedPath, !storedPath.isEmpty else {
+            return nil
+        }
+        let decodedPath = storedPath.removingPercentEncoding ?? storedPath
+        return URL(fileURLWithPath: decodedPath)
     }
 }
 
@@ -249,7 +257,7 @@ struct LaunchItemSnapshot: Codable {
         title = item.title
         subtitle = item.subtitle
         kind = item.kind.rawValue
-        bundlePath = item.bundleURL?.path()
+        bundlePath = item.bundleURL?.path
         children = item.children.map(LaunchItemSnapshot.init)
     }
 
@@ -259,10 +267,18 @@ struct LaunchItemSnapshot: Codable {
             title: title,
             subtitle: subtitle,
             kind: LaunchItem.Kind(rawValue: kind) ?? .app,
-            bundleURL: bundlePath.map(URL.init(fileURLWithPath:)),
+            bundleURL: decodeBundleURL(from: bundlePath),
             children: children.map { $0.materialize() }
         )
     }
+}
+
+private func decodeBundleURL(from storedPath: String?) -> URL? {
+    guard let storedPath, !storedPath.isEmpty else {
+        return nil
+    }
+    let decodedPath = storedPath.removingPercentEncoding ?? storedPath
+    return URL(fileURLWithPath: decodedPath)
 }
 
 private struct StoredLayoutEntry {

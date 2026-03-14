@@ -339,7 +339,7 @@ struct LaunchDeckShellView: View {
                 let clampedPage = min(max(page, 0), max(store.pageCount - 1, 0))
                 let pageItems = store.pagedItems[clampedPage]
                 return AnyView(
-                    pageContent(items: pageItems)
+                    pageCanvas(items: pageItems)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 )
             }
@@ -366,6 +366,19 @@ struct LaunchDeckShellView: View {
         hasher.combine(store.items.count)
         hasher.combine(store.query)
         return hasher.finalize()
+    }
+
+    private func pageCanvas(items: [LaunchItem]) -> some View {
+        ZStack {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    handleCanvasTap()
+                }
+
+            pageContent(items: items)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     private func pageContent(items: [LaunchItem]) -> some View {
