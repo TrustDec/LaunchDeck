@@ -8,6 +8,8 @@ struct LaunchDeckShellView: View {
     @State private var pageColumns = 8
     @State private var pageRows = 6
     @State private var wallpaper: NSImage?
+    @State private var activeFolder: LaunchItem?
+    @State private var isFolderOverlayVisible = false
 
     private var metrics: ShellLayoutMetrics {
         store.compactMode ? .compact : .regular
@@ -49,7 +51,7 @@ struct LaunchDeckShellView: View {
                 .allowsHitTesting(false)
 
                 WheelPagingInputMonitor(
-                    isEnabled: !store.isSearching && store.selectedFolder == nil && store.pageCount > 1,
+                    isEnabled: !store.isSearching && activeFolder == nil && store.pageCount > 1,
                     onPreviousPage: {
                         store.previousPage()
                     },
@@ -60,7 +62,7 @@ struct LaunchDeckShellView: View {
                 .allowsHitTesting(false)
 
                 MouseDragPagingInputMonitor(
-                    isEnabled: !store.isSearching && store.selectedFolder == nil && store.pageCount > 1,
+                    isEnabled: !store.isSearching && activeFolder == nil && store.pageCount > 1,
                     onPreviousPage: {
                         store.previousPage()
                     },
@@ -70,12 +72,18 @@ struct LaunchDeckShellView: View {
                 )
                 .allowsHitTesting(false)
 
+                if let folder = activeFolder {
+                    folderOverlay(for: folder)
+                }
             }
             .task {
                 await store.loadIfNeeded()
             }
             .onChange(of: store.query) { _, _ in
                 store.syncSearchSelection()
+            }
+            .onChange(of: store.selectedFolder) { _, next in
+                syncFolderOverlay(with: next)
             }
             .task(id: "\(Int(proxy.size.width))x\(Int(proxy.size.height))-\(store.compactMode)") {
                 let preferredColumns = 8
@@ -114,9 +122,6 @@ struct LaunchDeckShellView: View {
             }
             .onExitCommand {
                 store.handleExitCommand()
-            }
-            .sheet(item: $store.selectedFolder) { folder in
-                folderSheet(for: folder)
             }
         }
     }
@@ -422,33 +427,52 @@ struct LaunchDeckShellView: View {
         .padding(.top, 8)
     }
 
-    private func folderSheet(for folder: LaunchItem) -> some View {
-        let resolvedFolder = store.items.first(where: { $0.id == folder.id && $0.isFolder }) ?? folder
-        let itemCount = max(resolvedFolder.children.count, 1)
-        let columns = min(max(Int(ceil(sqrt(Double(itemCount)))), 1), 5)
-        let tileSize = metrics.folderTileSize
-        let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: 22), count: columns)
-
-        return VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Text(resolvedFolder.title)
-                    .font(.system(size: 28, weight: .semibold))
-                Spacer(minLength: 16)
-                Button("Done") {
+    private func folderOverlay(for folder: LaunchItem) -> some View {
+        ZStack {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
                     store.closeFolder()
                 }
-                .keyboardShortcut(.cancelAction)
-            }
+
+            folderPanel(for: folder)
+                .scaleEffect(isFolderOverlayVisible ? 1 : 1.018)
+                .opacity(isFolderOverlayVisible ? 1 : 0)
+                .onTapGesture { }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func folderPanel(for folder: LaunchItem) -> some View {
+        let resolvedFolder = store.items.first(where: { $0.id == folder.id && $0.isFolder }) ?? folder
+        let itemCount = max(resolvedFolder.children.count, 1)
+        let folderMetrics = ShellLayoutMetrics.compact
+        let targetRows = 3
+        let columns = min(max(Int(ceil(Double(itemCount) / Double(targetRows))), 1), 7)
+        let rows = max(Int(ceil(Double(itemCount) / Double(columns))), 1)
+        let tileSize = folderMetrics.labelWidth
+        let spacingX: CGFloat = 22
+        let spacingY: CGFloat = 24
+        let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: spacingX), count: columns)
+        let gridWidth = CGFloat(columns) * tileSize + CGFloat(max(columns - 1, 0)) * spacingX
+        let gridHeight = CGFloat(rows) * folderMetrics.cellHeight + CGFloat(max(rows - 1, 0)) * spacingY
+        let panelWidth = min(max(gridWidth + 72, 640), 1080)
+        let panelHeight = min(max(gridHeight + 152, 420), 720)
+
+        return VStack(alignment: .leading, spacing: 20) {
+            Text(resolvedFolder.title)
+                .font(.system(size: 34, weight: .medium))
+                .frame(maxWidth: .infinity, alignment: .center)
 
             ScrollView(.vertical, showsIndicators: true) {
-                LazyVGrid(columns: gridColumns, spacing: 24) {
+                LazyVGrid(columns: gridColumns, spacing: spacingY) {
                     ForEach(resolvedFolder.children) { child in
                         Button {
                             store.closeFolder()
                             store.activate(child)
                         } label: {
                             VStack(spacing: 10) {
-                                ShellIconTile(item: child, isActive: false, metrics: metrics)
+                                ShellIconTile(item: child, isActive: false, metrics: folderMetrics)
                                 Text(child.title)
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(Color(nsColor: .labelColor))
@@ -463,7 +487,7 @@ struct LaunchDeckShellView: View {
             }
         }
         .padding(28)
-        .frame(minWidth: 640, minHeight: 460, alignment: .topLeading)
+        .frame(width: panelWidth, height: panelHeight, alignment: .topLeading)
         .background {
             SystemGlassSurface(cornerRadius: 28, style: .regular)
         }
@@ -471,6 +495,29 @@ struct LaunchDeckShellView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.2), lineWidth: 1)
+        }
+    }
+
+    private func syncFolderOverlay(with nextFolder: LaunchItem?) {
+        if let nextFolder {
+            activeFolder = nextFolder
+            withAnimation(.easeOut(duration: 0.22)) {
+                isFolderOverlayVisible = true
+            }
+            return
+        }
+
+        guard activeFolder != nil else {
+            return
+        }
+
+        withAnimation(.easeIn(duration: 0.16)) {
+            isFolderOverlayVisible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            if store.selectedFolder == nil {
+                activeFolder = nil
+            }
         }
     }
 
