@@ -5,36 +5,18 @@ import SwiftUI
 struct LaunchDeckShellView: View {
     @ObservedObject var store: LaunchDeckShellStore
     @Environment(\.colorScheme) private var colorScheme
-    @Namespace private var folderTransitionNamespace
     @State private var pageColumns = 6
     @State private var pageRows = 5
-    @State private var pageDragOffset: CGFloat = 0
-    @State private var pageDragContainerWidth: CGFloat = 0
     @State private var wallpaper: NSImage?
 
     private var metrics: ShellLayoutMetrics {
         store.compactMode ? .compact : .regular
     }
 
-    private var pageDragProgress: CGFloat {
-        let denominator = max(pageDragContainerWidth * 0.42, 220)
-        return max(min(pageDragOffset / denominator, 1), -1)
-    }
-
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 backgroundAtmosphere
-
-                if store.selectedFolder != nil, !store.isSearching {
-                    Color.black
-                        .opacity(colorScheme == .dark ? 0.2 : 0.08)
-                        .ignoresSafeArea()
-                        .onTapGesture {
-                            store.closeFolder()
-                        }
-                        .transition(.opacity)
-                }
 
                 VStack(spacing: 28) {
                     topBar
@@ -44,31 +26,11 @@ struct LaunchDeckShellView: View {
                         searchResultsGrid(in: proxy.size)
                     } else {
                         pageGrid(in: proxy.size)
-                            .scaleEffect(1 - abs(pageDragProgress) * 0.018)
-                            .opacity(1 - abs(pageDragProgress) * 0.08)
-                            .gesture(pageDragGesture)
-                        pageDots
-                            .opacity(1 - abs(pageDragProgress) * 0.15)
                     }
 
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 36)
-                .animation(.spring(response: 0.32, dampingFraction: 0.86), value: store.selectedFolder?.id)
-                .animation(.easeInOut(duration: 0.2), value: store.isSearching)
-
-                ShellPagingInputMonitor(
-                    isEnabled: !store.isSearching && store.selectedFolder == nil,
-                    onPreviousPage: {
-                        guard store.selectedFolder == nil else { return }
-                        store.previousPage()
-                    },
-                    onNextPage: {
-                        guard store.selectedFolder == nil else { return }
-                        store.nextPage()
-                    }
-                )
-                .allowsHitTesting(false)
 
                 SearchCommandMonitor(
                     isEnabled: store.isSearching,
@@ -120,6 +82,9 @@ struct LaunchDeckShellView: View {
             .onExitCommand {
                 store.handleExitCommand()
             }
+            .sheet(item: $store.selectedFolder) { folder in
+                folderSheet(for: folder)
+            }
         }
     }
 
@@ -134,7 +99,6 @@ struct LaunchDeckShellView: View {
                     .saturation(1.04)
                     .blur(radius: 20)
                     .overlay(Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08))
-                    .transition(.opacity)
             } else {
                 LinearGradient(
                     colors: colorScheme == .dark
@@ -174,9 +138,7 @@ struct LaunchDeckShellView: View {
                             ShellIconTile(
                                 item: item,
                                 isActive: item.id == store.selectedFolder?.id,
-                                metrics: metrics,
-                                namespace: folderTransitionNamespace,
-                                expandedFolderID: store.selectedFolder?.id
+                                metrics: metrics
                             )
 
                             VStack(spacing: 3) {
@@ -237,7 +199,6 @@ struct LaunchDeckShellView: View {
                 .stroke(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.2), lineWidth: 1)
         }
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.2 : 0.08), radius: 24, y: 14)
-        .transition(.opacity.combined(with: .scale(scale: 0.985)))
     }
 
     private func searchResultSubtitle(for item: LaunchItem) -> String? {
@@ -326,7 +287,6 @@ struct LaunchDeckShellView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 8)
-                .transition(.opacity)
             }
         }
         .frame(maxWidth: 720)
@@ -350,98 +310,58 @@ struct LaunchDeckShellView: View {
 
     private func pageGrid(in size: CGSize) -> some View {
         let contentWidth = max(size.width - 72, 320)
-        let _ = updatePageDragContainerWidth(contentWidth)
-        let pageWidth = contentWidth
-        let pageIndices = visiblePageIndices()
-
-        return ZStack {
-            HStack(spacing: 0) {
-                ForEach(pageIndices, id: \.self) { page in
-                    pageContent(page: page)
-                        .frame(width: pageWidth)
-                }
-            }
-            .offset(x: (-CGFloat(pageIndices.first ?? store.currentPage) * pageWidth) + pageDragOffset)
-            .animation(.spring(response: 0.28, dampingFraction: 0.86), value: store.selectedFolder?.id)
+        return NativePageControllerHost(pageCount: store.pageCount, selection: pageSelectionBinding) { page in
+            let clampedPage = min(max(page, 0), max(store.pageCount - 1, 0))
+            let pageItems = store.pagedItems[clampedPage]
+            return AnyView(
+                pageContent(items: pageItems)
+                    .frame(width: contentWidth)
+            )
         }
-        .frame(width: contentWidth, alignment: .leading)
-        .overlay(alignment: pageDragProgress > 0 ? .leading : .trailing) {
-            if abs(pageDragProgress) > 0.02 {
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(colorScheme == .dark ? 0.12 : 0.1),
-                        Color.clear,
-                    ],
-                    startPoint: pageDragProgress > 0 ? .leading : .trailing,
-                    endPoint: pageDragProgress > 0 ? .trailing : .leading
-                )
-                .frame(width: 120)
-                .blur(radius: 18)
-                .opacity(abs(pageDragProgress))
-                .allowsHitTesting(false)
-            }
-        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(width: contentWidth, alignment: .center)
     }
 
-    private func visiblePageIndices() -> [Int] {
-        let lower = max(store.currentPage - 1, 0)
-        let upper = min(store.currentPage + 1, max(store.pageCount - 1, 0))
-        return Array(lower...upper)
+    private var pageSelectionBinding: Binding<Int> {
+        Binding(
+            get: { min(max(store.currentPage, 0), max(store.pageCount - 1, 0)) },
+            set: { store.selectPage($0) }
+        )
     }
 
-    private func pageContent(page: Int) -> some View {
-        let items = store.pagedItems[min(max(page, 0), max(store.pageCount - 1, 0))]
-        let rows = items.chunked(into: pageColumns)
+    private func pageContent(items: [LaunchItem]) -> some View {
+        let rows = items.chunked(into: max(pageColumns, 1))
         let rowHeight = CGFloat(pageRows) * metrics.cellHeight + CGFloat(max(pageRows - 1, 0)) * metrics.rowSpacing
-        let selectedFolderID = page == store.currentPage ? store.selectedFolder?.id : nil
-        let baseIndex = page * max(store.pageSize, 1)
 
         return VStack(alignment: .center, spacing: metrics.rowSpacing - 6) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowItems in
-                let rowContainsSelectedFolder = selectedFolderID != nil && rowItems.contains(where: { $0.id == selectedFolderID })
-                VStack(spacing: 18) {
-                    HStack(alignment: .top, spacing: metrics.columnSpacing) {
-                        ForEach(Array(rowItems.enumerated()), id: \.element.id) { _, item in
-                            Button {
-                                store.activate(item)
-                            } label: {
-                                VStack(spacing: 10) {
-                                    ShellIconTile(
-                                        item: item,
-                                        isActive: item.id == selectedFolderID,
-                                        metrics: metrics,
-                                        namespace: folderTransitionNamespace,
-                                        expandedFolderID: store.selectedFolder?.id
-                                    )
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, rowItems in
+                HStack(alignment: .top, spacing: metrics.columnSpacing) {
+                    ForEach(Array(rowItems.enumerated()), id: \.element.id) { _, item in
+                        Button {
+                            store.activate(item)
+                        } label: {
+                            VStack(spacing: 10) {
+                                ShellIconTile(
+                                    item: item,
+                                    isActive: item.id == store.selectedFolder?.id,
+                                    metrics: metrics
+                                )
 
-                                    Text(item.title)
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(Color(nsColor: .labelColor))
-                                        .lineLimit(1)
-                                        .frame(width: metrics.labelWidth)
-                                }
+                                Text(item.title)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color(nsColor: .labelColor))
+                                    .lineLimit(1)
+                                    .frame(width: metrics.labelWidth)
                             }
-                            .buttonStyle(.plain)
                         }
-
-                        ForEach(rowItems.count..<pageColumns, id: \.self) { emptyColumn in
-                            let absoluteIndex = baseIndex + rowIndex * pageColumns + emptyColumn
-                            emptyDropSlot(at: absoluteIndex)
-                        }
+                        .buttonStyle(.plain)
                     }
 
-                    if let folder = selectedFolder(in: rowItems), page == store.currentPage {
-                        folderPanel(for: folder)
-                            .transition(.asymmetric(
-                                insertion: .offset(y: -12).combined(with: .scale(scale: 0.975, anchor: .top)).combined(with: .opacity),
-                                removal: .offset(y: -6).combined(with: .scale(scale: 0.988, anchor: .top)).combined(with: .opacity)
-                            ))
+                    ForEach(rowItems.count..<pageColumns, id: \.self) { _ in
+                        Color.clear
+                            .frame(width: metrics.labelWidth, height: metrics.cellHeight)
                     }
                 }
-                .scaleEffect(selectedFolderID == nil ? 1 : (rowContainsSelectedFolder ? 1 : 0.972), anchor: .top)
-                .opacity(selectedFolderID == nil ? 1 : (rowContainsSelectedFolder ? 1 : 0.28))
-                .blur(radius: selectedFolderID == nil ? 0 : (rowContainsSelectedFolder ? 0 : 7))
-                .zIndex(rowContainsSelectedFolder ? 2 : 0)
             }
         }
         .frame(maxWidth: .infinity)
@@ -449,205 +369,48 @@ struct LaunchDeckShellView: View {
         .padding(.top, 8)
     }
 
-    private var pageDragGesture: some Gesture {
-        DragGesture(minimumDistance: 10, coordinateSpace: .local)
-            .onChanged { value in
-                guard abs(value.translation.width) > abs(value.translation.height),
-                      store.selectedFolder == nil
-                else {
-                    return
+    private func folderSheet(for folder: LaunchItem) -> some View {
+        let resolvedFolder = store.items.first(where: { $0.id == folder.id && $0.isFolder }) ?? folder
+        let itemCount = max(resolvedFolder.children.count, 1)
+        let columns = min(max(Int(ceil(sqrt(Double(itemCount)))), 1), 5)
+        let tileSize = metrics.folderTileSize
+        let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: 22), count: columns)
+
+        return VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text(resolvedFolder.title)
+                    .font(.system(size: 28, weight: .semibold))
+                Spacer(minLength: 16)
+                Button("Done") {
+                    store.closeFolder()
                 }
-                pageDragOffset = adjustedPageDragOffset(for: value.translation.width)
+                .keyboardShortcut(.cancelAction)
             }
-            .onEnded { value in
-                guard abs(value.translation.width) > abs(value.translation.height),
-                      store.selectedFolder == nil
-                else {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
-                        pageDragOffset = 0
-                    }
-                    return
-                }
 
-                let threshold = min(max(pageDragContainerWidth * 0.16, 80), 160)
-                let predicted = value.predictedEndTranslation.width
-                let effectiveTranslation = adjustedPageDragOffset(
-                    for: abs(predicted) > abs(value.translation.width) ? predicted : value.translation.width
-                )
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                    if effectiveTranslation > threshold {
-                        store.previousPage()
-                    } else if effectiveTranslation < -threshold {
-                        store.nextPage()
-                    }
-                    pageDragOffset = 0
-                }
-            }
-    }
-
-    @discardableResult
-    private func updatePageDragContainerWidth(_ width: CGFloat) -> CGFloat {
-        if abs(pageDragContainerWidth - width) > 1 {
-            DispatchQueue.main.async {
-                pageDragContainerWidth = width
-            }
-        }
-        return width
-    }
-
-    private func adjustedPageDragOffset(for translation: CGFloat) -> CGFloat {
-        let clampedBase = max(min(translation, pageDragContainerWidth * 0.72), -pageDragContainerWidth * 0.72)
-        let isPullingPastLeadingEdge = store.currentPage == 0 && clampedBase > 0
-        let isPullingPastTrailingEdge = store.currentPage >= max(store.pageCount - 1, 0) && clampedBase < 0
-        guard isPullingPastLeadingEdge || isPullingPastTrailingEdge else {
-            return clampedBase
-        }
-        return clampedBase * 0.34
-    }
-
-    private func emptyDropSlot(at absoluteIndex: Int) -> some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(Color.clear)
-            .frame(width: metrics.labelWidth, height: metrics.cellHeight)
-            .contentShape(Rectangle())
-    }
-
-    private var pageDots: some View {
-        HStack(spacing: 10) {
-            ForEach(0..<store.pageCount, id: \.self) { page in
-                Button {
-                    store.selectPage(page)
-                } label: {
-                    Capsule()
-                        .fill(Color(nsColor: .labelColor).opacity(pageDotOpacity(for: page)))
-                        .frame(width: pageDotWidth(for: page), height: 8)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .background {
-            SystemGlassSurface(cornerRadius: 18, style: .regular)
-        }
-        .clipShape(Capsule())
-    }
-
-    private func pageDotWidth(for page: Int) -> CGFloat {
-        let progress = abs(pageDragProgress)
-        let targetPage = projectedAdjacentPage()
-        if page == store.currentPage {
-            return 18 - (10 * progress)
-        }
-        if page == targetPage {
-            return 8 + (10 * progress)
-        }
-        return 8
-    }
-
-    private func pageDotOpacity(for page: Int) -> CGFloat {
-        let progress = abs(pageDragProgress)
-        let targetPage = projectedAdjacentPage()
-        if page == store.currentPage {
-            return 0.92 - (0.42 * progress)
-        }
-        if page == targetPage {
-            return 0.22 + (0.52 * progress)
-        }
-        return 0.22
-    }
-
-    private func projectedAdjacentPage() -> Int? {
-        guard abs(pageDragProgress) > 0.01 else {
-            return nil
-        }
-        let candidate = pageDragProgress < 0 ? store.currentPage + 1 : store.currentPage - 1
-        let clamped = min(max(candidate, 0), max(store.pageCount - 1, 0))
-        return clamped == store.currentPage ? nil : clamped
-    }
-
-    private func folderPanel(for folder: LaunchItem) -> some View {
-        let itemCount = max(folder.children.count, 1)
-        let columns = min(max(Int(ceil(sqrt(Double(itemCount)))), 1), 4)
-        let rows = Int(ceil(Double(itemCount) / Double(columns)))
-        let tileSize: CGFloat = metrics.folderTileSize
-        let horizontalSpacing: CGFloat = 22
-        let verticalSpacing: CGFloat = 24
-        let gridWidth = CGFloat(columns) * tileSize + CGFloat(max(columns - 1, 0)) * horizontalSpacing
-        let gridHeight = CGFloat(rows) * (tileSize + 28) + CGFloat(max(rows - 1, 0)) * verticalSpacing
-
-        return VStack(spacing: 24) {
-            HStack(spacing: 12) {
-                Text(folder.title)
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(Color(nsColor: .labelColor))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-            }
-            .frame(width: gridWidth, alignment: .leading)
-
-            let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: horizontalSpacing), count: columns)
-
-            LazyVGrid(columns: gridColumns, spacing: verticalSpacing) {
-                ForEach(folder.children) { child in
-                    Button {
-                        store.activate(child)
-                    } label: {
-                        VStack(spacing: 10) {
-                            ShellIconTile(
-                                item: child,
-                                isActive: false,
-                                metrics: metrics,
-                                namespace: folderTransitionNamespace,
-                                expandedFolderID: store.selectedFolder?.id
-                            )
-
-                            Text(child.title)
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(Color(nsColor: .labelColor))
-                                .lineLimit(1)
-                                .frame(width: tileSize)
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVGrid(columns: gridColumns, spacing: 24) {
+                    ForEach(resolvedFolder.children) { child in
+                        Button {
+                            store.closeFolder()
+                            store.activate(child)
+                        } label: {
+                            VStack(spacing: 10) {
+                                ShellIconTile(item: child, isActive: false, metrics: metrics)
+                                Text(child.title)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Color(nsColor: .labelColor))
+                                    .lineLimit(1)
+                                    .frame(width: tileSize)
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(width: gridWidth, height: gridHeight, alignment: .top)
-
-            Button("Close Folder") {
-                store.closeFolder()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background {
-                SystemGlassSurface(cornerRadius: 16, style: .clear)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .padding(.horizontal, 34)
-        .padding(.vertical, 28)
-        .frame(width: gridWidth + 68, alignment: .top)
-        .background {
-            SystemGlassSurface(cornerRadius: 30, style: .regular)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-        .matchedGeometryEffect(id: "folder-surface-\(folder.id.uuidString)", in: folderTransitionNamespace, properties: .frame, anchor: .center, isSource: false)
-        .overlay {
-            RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .stroke(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.22), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: 28, y: 18)
-    }
-
-    private func selectedFolder(in rowItems: [LaunchItem]) -> LaunchItem? {
-        guard let selectedFolder = store.selectedFolder else {
-            return nil
-        }
-
-        return rowItems.first(where: { $0.id == selectedFolder.id })
+        .padding(28)
+        .frame(minWidth: 640, minHeight: 460, alignment: .topLeading)
     }
 
 }
@@ -699,8 +462,6 @@ private struct ShellIconTile: View {
     let item: LaunchItem
     let isActive: Bool
     let metrics: ShellLayoutMetrics
-    let namespace: Namespace.ID
-    let expandedFolderID: UUID?
     @State private var icon: NSImage?
 
     var body: some View {
@@ -712,13 +473,6 @@ private struct ShellIconTile: View {
                         SystemGlassSurface(cornerRadius: 22, style: .regular)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .matchedGeometryEffect(
-                        id: "folder-surface-\(item.id.uuidString)",
-                        in: namespace,
-                        properties: .frame,
-                        anchor: .center,
-                        isSource: expandedFolderID != item.id
-                    )
 
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(24), spacing: 4), count: 2), spacing: 4) {
                     ForEach(Array(item.children.prefix(4).enumerated()), id: \.offset) { _, child in
@@ -933,17 +687,6 @@ private extension Array {
     }
 }
 
-private extension View {
-    @ViewBuilder
-    func applyIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
-        if condition {
-            transform(self)
-        } else {
-            self
-        }
-    }
-}
-
 private struct AppIconImageView: NSViewRepresentable {
     let image: NSImage
 
@@ -959,96 +702,87 @@ private struct AppIconImageView: NSViewRepresentable {
     }
 }
 
-private struct ShellPagingInputMonitor: NSViewRepresentable {
-    let isEnabled: Bool
-    let onPreviousPage: () -> Void
-    let onNextPage: () -> Void
+private struct NativePageControllerHost: NSViewControllerRepresentable {
+    let pageCount: Int
+    @Binding var selection: Int
+    let makePage: (Int) -> AnyView
+
+    private var arrangedObjects: [Int] {
+        Array(0..<max(pageCount, 1))
+    }
+
+    private var clampedSelection: Int {
+        min(max(selection, 0), max(pageCount - 1, 0))
+    }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onPreviousPage: onPreviousPage, onNextPage: onNextPage)
+        Coordinator(parent: self)
     }
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        context.coordinator.install(isEnabled: isEnabled)
-        return view
+    func makeNSViewController(context: Context) -> NSPageController {
+        let controller = NSPageController()
+        controller.delegate = context.coordinator
+        controller.transitionStyle = .horizontalStrip
+        controller.arrangedObjects = arrangedObjects
+        controller.selectedIndex = clampedSelection
+        return controller
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.onPreviousPage = onPreviousPage
-        context.coordinator.onNextPage = onNextPage
-        context.coordinator.install(isEnabled: isEnabled)
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.uninstall()
-    }
-
-    final class Coordinator {
-        var onPreviousPage: () -> Void
-        var onNextPage: () -> Void
-        private var monitor: Any?
-        private var isInstalled = false
-        private var lastTriggerTime: TimeInterval = 0
-
-        init(
-            onPreviousPage: @escaping () -> Void,
-            onNextPage: @escaping () -> Void
-        ) {
-            self.onPreviousPage = onPreviousPage
-            self.onNextPage = onNextPage
+    func updateNSViewController(_ controller: NSPageController, context: Context) {
+        context.coordinator.parent = self
+        let existingObjects = controller.arrangedObjects as? [Int]
+        if existingObjects != arrangedObjects {
+            controller.arrangedObjects = arrangedObjects
         }
 
-        func install(isEnabled: Bool) {
-            guard isEnabled else {
-                uninstall()
+        if controller.selectedIndex != clampedSelection {
+            controller.selectedIndex = clampedSelection
+        }
+    }
+
+    final class Coordinator: NSObject, NSPageControllerDelegate {
+        var parent: NativePageControllerHost
+
+        init(parent: NativePageControllerHost) {
+            self.parent = parent
+        }
+
+        func pageController(_ pageController: NSPageController, identifierFor object: Any) -> NSPageController.ObjectIdentifier {
+            "page"
+        }
+
+        func pageController(_ pageController: NSPageController, viewControllerForIdentifier identifier: NSPageController.ObjectIdentifier) -> NSViewController {
+            NativePageHostingController()
+        }
+
+        func pageController(_ pageController: NSPageController, prepare viewController: NSViewController, with object: Any?) {
+            guard let host = viewController as? NativePageHostingController,
+                  let page = object as? Int else {
                 return
             }
-
-            guard !isInstalled else {
-                return
-            }
-
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self else { return event }
-                guard event.window != nil else { return event }
-
-                let now = ProcessInfo.processInfo.systemUptime
-                if now - lastTriggerTime < 0.22 {
-                    return event
-                }
-
-                let deltaX = event.scrollingDeltaX
-                let deltaY = event.scrollingDeltaY
-
-                if abs(deltaX) >= abs(deltaY), abs(deltaX) > 3 {
-                    lastTriggerTime = now
-                    deltaX > 0 ? onNextPage() : onPreviousPage()
-                    return nil
-                }
-
-                guard abs(deltaY) > 3 else {
-                    return event
-                }
-
-                lastTriggerTime = now
-                deltaY > 0 ? onNextPage() : onPreviousPage()
-                return nil
-            }
-            isInstalled = true
+            host.rootView = parent.makePage(page)
         }
 
-        func uninstall() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
+        func pageControllerDidEndLiveTransition(_ pageController: NSPageController) {
+            pageController.completeTransition()
+            let selected = pageController.selectedIndex
+            if parent.selection != selected {
+                DispatchQueue.main.async { [weak self] in
+                    self?.parent.selection = selected
+                }
             }
-            monitor = nil
-            isInstalled = false
         }
+    }
+}
 
-        deinit {
-            uninstall()
-        }
+private final class NativePageHostingController: NSHostingController<AnyView> {
+    init() {
+        super.init(rootView: AnyView(EmptyView()))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
     }
 }
 
