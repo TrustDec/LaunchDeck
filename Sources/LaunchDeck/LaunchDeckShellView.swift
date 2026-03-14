@@ -43,6 +43,7 @@ struct LaunchDeckShellView: View {
                 }
                 .padding(.horizontal, horizontalInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .compositingGroup()
                 .scaleEffect(isFolderPresented ? 1.08 : 1)
                 .opacity(isFolderPresented ? 0 : 1)
                 .allowsHitTesting(!isFolderMode)
@@ -442,6 +443,7 @@ struct LaunchDeckShellView: View {
             folderPanel(for: folder, in: viewport)
                 .onTapGesture { }
         }
+        .compositingGroup()
         .scaleEffect(isFolderOverlayVisible ? 1 : 1.08)
         .opacity(isFolderOverlayVisible ? 1 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)

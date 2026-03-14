@@ -55,31 +55,29 @@ final class LaunchDeckShellWindowController: NSWindowController {
     private func animateIn(window: NSWindow) {
         let finalFrame = displayTarget.resolve()?.frame ?? window.frame
         window.setFrame(finalFrame, display: true)
-        window.alphaValue = 0
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
 
         guard let contentView = window.contentView else {
-            window.alphaValue = 1
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
         prepareAnimationLayer(for: contentView)
-        contentView.alphaValue = 0
-        contentView.layer?.transform = CATransform3DMakeScale(openScale, openScale, 1)
-        animateContentScale(
+        setRasterization(for: contentView, enabled: true)
+        window.alphaValue = 1
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        animateContentPresentation(
             for: contentView,
-            from: openScale,
-            to: 1,
+            fromScale: openScale,
+            toScale: 1,
+            fromOpacity: 0,
+            toOpacity: 1,
             duration: openDuration,
             timingFunction: CAMediaTimingFunction(name: .easeOut),
-            key: "launchdeck.window.open.scale"
-        )
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = openDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            window.animator().alphaValue = 1
-            contentView.animator().alphaValue = 1
+            key: "launchdeck.window.open"
+        ) { [weak contentView] in
+            guard let contentView else { return }
+            self.setRasterization(for: contentView, enabled: false)
         }
     }
 
@@ -87,31 +85,28 @@ final class LaunchDeckShellWindowController: NSWindowController {
         let contentView = window.contentView
         if let contentView {
             prepareAnimationLayer(for: contentView)
-            contentView.alphaValue = 1
-            animateContentScale(
+            animateContentPresentation(
                 for: contentView,
-                from: 1,
-                to: openScale,
+                fromScale: 1,
+                toScale: openScale,
+                fromOpacity: 1,
+                toOpacity: 0,
                 duration: closeDuration,
                 timingFunction: CAMediaTimingFunction(name: .easeIn),
-                key: "launchdeck.window.close.scale"
-            )
-        }
-
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = closeDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            window.animator().alphaValue = 0
-            contentView?.animator().alphaValue = 0
-        }, completionHandler: {
-            Task { @MainActor in
-                window.orderOut(nil)
-                window.alphaValue = 1
-                contentView?.alphaValue = 1
-                contentView?.layer?.removeAllAnimations()
-                contentView?.layer?.transform = CATransform3DIdentity
+                key: "launchdeck.window.close"
+            ) {
+                Task { @MainActor in
+                    window.orderOut(nil)
+                    contentView.layer?.removeAllAnimations()
+                    contentView.layer?.transform = CATransform3DIdentity
+                    contentView.layer?.opacity = 1
+                    self.setRasterization(for: contentView, enabled: false)
+                }
             }
-        })
+            setRasterization(for: contentView, enabled: true)
+            return
+        }
+        window.orderOut(nil)
     }
 
     private func prepareAnimationLayer(for contentView: NSView) {
@@ -129,22 +124,47 @@ final class LaunchDeckShellWindowController: NSWindowController {
         CATransaction.commit()
     }
 
-    private func animateContentScale(
+    private func animateContentPresentation(
         for contentView: NSView,
-        from: CGFloat,
-        to: CGFloat,
+        fromScale: CGFloat,
+        toScale: CGFloat,
+        fromOpacity: Float,
+        toOpacity: Float,
         duration: TimeInterval,
         timingFunction: CAMediaTimingFunction,
-        key: String
+        key: String,
+        completion: (() -> Void)? = nil
     ) {
         guard let layer = contentView.layer else { return }
-        let animation = CABasicAnimation(keyPath: "transform")
-        animation.fromValue = CATransform3DMakeScale(from, from, 1)
-        animation.toValue = CATransform3DMakeScale(to, to, 1)
-        animation.duration = duration
-        animation.timingFunction = timingFunction
-        layer.add(animation, forKey: key)
-        layer.transform = CATransform3DMakeScale(to, to, 1)
+        let scaleAnimation = CABasicAnimation(keyPath: "transform")
+        scaleAnimation.fromValue = CATransform3DMakeScale(fromScale, fromScale, 1)
+        scaleAnimation.toValue = CATransform3DMakeScale(toScale, toScale, 1)
+
+        let opacityAnimation = CABasicAnimation(keyPath: "opacity")
+        opacityAnimation.fromValue = fromOpacity
+        opacityAnimation.toValue = toOpacity
+
+        let group = CAAnimationGroup()
+        group.animations = [scaleAnimation, opacityAnimation]
+        group.duration = duration
+        group.timingFunction = timingFunction
+        group.isRemovedOnCompletion = true
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        CATransaction.setCompletionBlock(completion)
+        layer.transform = CATransform3DMakeScale(toScale, toScale, 1)
+        layer.opacity = toOpacity
+        layer.add(group, forKey: key)
+        CATransaction.commit()
+    }
+
+    private func setRasterization(for contentView: NSView, enabled: Bool) {
+        guard let layer = contentView.layer else { return }
+        layer.shouldRasterize = enabled
+        layer.rasterizationScale = contentView.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
     }
 }
 
