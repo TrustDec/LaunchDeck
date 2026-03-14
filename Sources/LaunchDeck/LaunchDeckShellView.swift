@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import ImageIO
 import SwiftUI
 
@@ -10,6 +11,7 @@ struct LaunchDeckShellView: View {
     @State private var wallpaper: NSImage?
     @State private var activeFolder: LaunchItem?
     @State private var isFolderOverlayVisible = false
+    @State private var pageDragOffset: CGFloat = 0
 
     private var metrics: ShellLayoutMetrics {
         store.compactMode ? .compact : .regular
@@ -31,20 +33,22 @@ struct LaunchDeckShellView: View {
                         handleCanvasTap()
                     }
 
-                VStack(spacing: 28) {
+                VStack(spacing: 22) {
                     topBar
-                        .padding(.top, 10)
+                        .padding(.top, topBarTopPadding(for: proxy.size))
 
                     if store.isSearching {
                         searchResultsGrid(in: proxy.size)
                     } else {
                         pageGrid(in: proxy.size)
                     }
+
+                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, horizontalInset)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .compositingGroup()
-                .scaleEffect(isFolderPresented ? 1.08 : 1)
+                .scaleEffect(isFolderPresented ? 0.96 : 1)
                 .opacity(isFolderPresented ? 0 : 1)
                 .allowsHitTesting(!isFolderMode)
 
@@ -57,17 +61,6 @@ struct LaunchDeckShellView: View {
                 .allowsHitTesting(false)
 
                 WheelPagingInputMonitor(
-                    isEnabled: !store.isSearching && activeFolder == nil && store.pageCount > 1,
-                    onPreviousPage: {
-                        store.previousPage()
-                    },
-                    onNextPage: {
-                        store.nextPage()
-                    }
-                )
-                .allowsHitTesting(false)
-
-                MouseDragPagingInputMonitor(
                     isEnabled: !store.isSearching && activeFolder == nil && store.pageCount > 1,
                     onPreviousPage: {
                         store.previousPage()
@@ -167,6 +160,11 @@ struct LaunchDeckShellView: View {
         .task(id: colorScheme == .dark) {
             wallpaper = await DesktopWallpaperLoader.loadAsync()
         }
+    }
+
+    private func topBarTopPadding(for size: CGSize) -> CGFloat {
+        _ = size
+        return 100
     }
 
     private func searchResultsGrid(in size: CGSize) -> some View {
@@ -355,11 +353,29 @@ struct LaunchDeckShellView: View {
                 )
             }
             .frame(height: contentHeight, alignment: .center)
+            .offset(x: pageDragOffset)
+            .contentShape(Rectangle())
+            .simultaneousGesture(pageDragGesture(containerWidth: contentWidth))
 
             NativePageIndicator(pageCount: store.pageCount, selection: pageSelectionBinding)
                 .frame(height: store.pageCount > 1 ? 24 : 0)
         }
         .frame(width: contentWidth, alignment: .center)
+        .onChange(of: store.currentPage) { _, _ in
+            if pageDragOffset != 0 {
+                pageDragOffset = 0
+            }
+        }
+        .onChange(of: activeFolder?.id) { _, _ in
+            if pageDragOffset != 0 {
+                pageDragOffset = 0
+            }
+        }
+        .onChange(of: store.isSearching) { _, isSearching in
+            if isSearching, pageDragOffset != 0 {
+                pageDragOffset = 0
+            }
+        }
     }
 
     private var pageSelectionBinding: Binding<Int> {
@@ -431,6 +447,61 @@ struct LaunchDeckShellView: View {
         .frame(maxWidth: .infinity)
         .frame(height: rowHeight, alignment: .top)
         .padding(.top, 8)
+    }
+
+    private func pageDragGesture(containerWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                guard !store.isSearching, activeFolder == nil, store.pageCount > 1 else { return }
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                pageDragOffset = normalizedPageDragOffset(
+                    for: value.translation.width,
+                    containerWidth: containerWidth
+                )
+            }
+            .onEnded { value in
+                guard !store.isSearching, activeFolder == nil, store.pageCount > 1 else {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
+                        pageDragOffset = 0
+                    }
+                    return
+                }
+
+                let horizontal = value.translation.width
+                guard abs(horizontal) > abs(value.translation.height) else {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
+                        pageDragOffset = 0
+                    }
+                    return
+                }
+
+                let predicted = value.predictedEndTranslation.width
+                let effective = abs(predicted) > abs(horizontal) ? predicted : horizontal
+                let threshold = min(max(containerWidth * 0.12, 70), 180)
+
+                if effective <= -threshold {
+                    store.nextPage()
+                } else if effective >= threshold {
+                    store.previousPage()
+                }
+
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.9)) {
+                    pageDragOffset = 0
+                }
+            }
+    }
+
+    private func normalizedPageDragOffset(for translation: CGFloat, containerWidth: CGFloat) -> CGFloat {
+        let maxOffset = min(max(containerWidth * 0.24, 90), 220)
+        let atFirstPage = store.currentPage <= 0
+        let atLastPage = store.currentPage >= store.pageCount - 1
+
+        var adjusted = translation
+        if (atFirstPage && translation > 0) || (atLastPage && translation < 0) {
+            adjusted *= 0.36
+        }
+
+        return min(max(adjusted, -maxOffset), maxOffset)
     }
 
     private func folderOverlay(for folder: LaunchItem, in viewport: CGSize) -> some View {
@@ -578,26 +649,263 @@ struct LaunchDeckShellView: View {
 }
 
 private enum DesktopWallpaperLoader {
+    private static let supportedImageExtensions: Set<String> = [
+        "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp"
+    ]
+
     static func loadAsync() async -> NSImage? {
-        await Task.detached(priority: .utility) {
+        return await Task.detached(priority: .utility) {
             load()
         }.value
     }
 
     static func load() -> NSImage? {
         guard let screen = NSScreen.main ?? NSScreen.screens.first,
-              let url = NSWorkspace.shared.desktopImageURL(for: screen) else {
+              let wallpaperURL = NSWorkspace.shared.desktopImageURL(for: screen) else {
             return nil
         }
 
-        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]),
-              values.isDirectory != true else {
+        let effectiveURL = resolveCurrentWallpaperURLUsingPrivateCache(
+            for: screen,
+            wallpaperURL: wallpaperURL
+        ) ?? wallpaperURL
+
+        guard let imageURL = resolveWallpaperImageURL(from: effectiveURL) else {
             return nil
         }
 
         let pixelScale = max(screen.backingScaleFactor, 1)
         let maxDimension = max(screen.frame.width, screen.frame.height) * pixelScale
-        return downsampledImage(at: url, maxPixelSize: min(maxDimension, 2560))
+        return downsampledImage(at: imageURL, maxPixelSize: min(maxDimension, 2560))
+    }
+
+    private static func resolveWallpaperImageURL(from url: URL) -> URL? {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) else {
+            return nil
+        }
+
+        if values.isRegularFile == true {
+            return url
+        }
+
+        if values.isDirectory == true {
+            return latestImageURL(in: url)
+        }
+
+        return nil
+    }
+
+    private static func resolveCurrentWallpaperURLUsingPrivateCache(
+        for screen: NSScreen,
+        wallpaperURL: URL
+    ) -> URL? {
+        guard let values = try? wallpaperURL.resourceValues(forKeys: [.isDirectoryKey]) else {
+            return nil
+        }
+        guard values.isDirectory == true else {
+            return nil
+        }
+
+        let cacheDirectory = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(
+                "Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/com.apple.wallpaper.caches/extension-com.apple.wallpaper.extension.image",
+                isDirectory: true
+            )
+        guard let cacheRecords = loadPrivateCacheRecords(from: cacheDirectory), !cacheRecords.isEmpty else {
+            return nil
+        }
+
+        let pixelWidth = max(Int((screen.frame.width * max(screen.backingScaleFactor, 1)).rounded()), 1)
+        let pixelHeight = max(Int((screen.frame.height * max(screen.backingScaleFactor, 1)).rounded()), 1)
+        let relevantRecords = pickRelevantRecords(
+            from: cacheRecords,
+            targetWidth: pixelWidth,
+            targetHeight: pixelHeight,
+            maxCount: 24
+        )
+        guard !relevantRecords.isEmpty else {
+            return nil
+        }
+
+        let wantedHashes = Set(relevantRecords.map(\.hash))
+        let hashToPath = buildHashToImagePathMap(in: wallpaperURL, wantedHashes: wantedHashes)
+
+        for record in relevantRecords {
+            if let path = hashToPath[record.hash] {
+                return URL(fileURLWithPath: path)
+            }
+        }
+
+        return nil
+    }
+
+    private struct PrivateCacheRecord {
+        let hash: String
+        let width: Int
+        let height: Int
+        let modifiedAt: Date
+    }
+
+    private static func loadPrivateCacheRecords(from directory: URL) -> [PrivateCacheRecord]? {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentModificationDateKey]
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        var records: [PrivateCacheRecord] = []
+        records.reserveCapacity(entries.count)
+
+        for entry in entries where entry.pathExtension.lowercased() == "bmp" {
+            guard let values = try? entry.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else {
+                continue
+            }
+
+            let stem = entry.deletingPathExtension().lastPathComponent
+            let parts = stem.split(separator: "-", omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { continue }
+            let hash = String(parts[0])
+            guard hash.count == 64,
+                  let width = Int(parts[1]),
+                  let height = Int(parts[2]) else {
+                continue
+            }
+
+            records.append(
+                PrivateCacheRecord(
+                    hash: hash,
+                    width: width,
+                    height: height,
+                    modifiedAt: values.contentModificationDate ?? .distantPast
+                )
+            )
+        }
+
+        if records.isEmpty {
+            return nil
+        }
+
+        records.sort { $0.modifiedAt > $1.modifiedAt }
+        return records
+    }
+
+    private static func pickRelevantRecords(
+        from records: [PrivateCacheRecord],
+        targetWidth: Int,
+        targetHeight: Int,
+        maxCount: Int
+    ) -> [PrivateCacheRecord] {
+        let exact = records.filter {
+            ($0.width == targetWidth && $0.height == targetHeight)
+                || ($0.width == targetHeight && $0.height == targetWidth)
+        }
+
+        if !exact.isEmpty {
+            return Array(exact.prefix(maxCount))
+        }
+
+        let near = records.sorted {
+            let lhsScore = abs($0.width - targetWidth) + abs($0.height - targetHeight)
+            let rhsScore = abs($1.width - targetWidth) + abs($1.height - targetHeight)
+            if lhsScore == rhsScore {
+                return $0.modifiedAt > $1.modifiedAt
+            }
+            return lhsScore < rhsScore
+        }
+        return Array(near.prefix(maxCount))
+    }
+
+    private static func buildHashToImagePathMap(
+        in directory: URL,
+        wantedHashes: Set<String>
+    ) -> [String: String] {
+        guard !wantedHashes.isEmpty else {
+            return [:]
+        }
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return [:]
+        }
+
+        var result: [String: String] = [:]
+        result.reserveCapacity(min(wantedHashes.count, 16))
+
+        for case let fileURL as URL in enumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            guard supportedImageExtensions.contains(ext),
+                  let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else {
+                continue
+            }
+
+            let hash = sha256Hex(of: fileURL.path)
+            if wantedHashes.contains(hash) {
+                result[hash] = fileURL.path
+                if result.count == wantedHashes.count {
+                    break
+                }
+            }
+        }
+
+        return result
+    }
+
+    private static func sha256Hex(of text: String) -> String {
+        SHA256.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func latestImageURL(in directory: URL) -> URL? {
+        let keys: [URLResourceKey] = [
+            .isRegularFileKey,
+            .contentModificationDateKey,
+            .isHiddenKey,
+        ]
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return nil
+        }
+
+        var bestURL: URL?
+        var bestDate: Date = .distantPast
+        var visitedCount = 0
+
+        for case let fileURL as URL in enumerator {
+            visitedCount += 1
+            if visitedCount > 4000 {
+                break
+            }
+
+            let ext = fileURL.pathExtension.lowercased()
+            guard supportedImageExtensions.contains(ext),
+                  let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true else {
+                continue
+            }
+
+            let modified = values.contentModificationDate ?? .distantPast
+            if modified >= bestDate {
+                bestDate = modified
+                bestURL = fileURL
+            }
+        }
+
+        return bestURL
     }
 
     private static func downsampledImage(at url: URL, maxPixelSize: CGFloat) -> NSImage? {
@@ -1110,8 +1418,10 @@ private struct WheelPagingInputMonitor: NSViewRepresentable {
         private var monitor: Any?
         private var isInstalled = false
         private var lastTriggerTime: TimeInterval = 0
-        private var preciseGestureConsumed = false
-        private var lastPreciseEventTime: TimeInterval = 0
+        private var accumulatedDelta: CGFloat = 0
+        private var accumulatedDirection: CGFloat = 0
+        private var lastEventTime: TimeInterval = 0
+        private var preciseGestureLocked = false
 
         init(
             onPreviousPage: @escaping () -> Void,
@@ -1135,18 +1445,17 @@ private struct WheelPagingInputMonitor: NSViewRepresentable {
                 guard let self else { return event }
 
                 let now = ProcessInfo.processInfo.systemUptime
-                if event.hasPreciseScrollingDeltas {
-                    if now - lastPreciseEventTime > 0.3 {
-                        preciseGestureConsumed = false
-                    }
-                    lastPreciseEventTime = now
+                let dominantDelta = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+                    ? event.scrollingDeltaX
+                    : event.scrollingDeltaY
 
+                if event.hasPreciseScrollingDeltas {
                     if event.phase == .began {
-                        preciseGestureConsumed = false
+                        resetAccumulation(lockPrecise: false)
                     }
 
                     if event.phase == .ended || event.phase == .cancelled {
-                        preciseGestureConsumed = false
+                        resetAccumulation(lockPrecise: false)
                         return event
                     }
 
@@ -1154,41 +1463,61 @@ private struct WheelPagingInputMonitor: NSViewRepresentable {
                         return nil
                     }
 
-                    if preciseGestureConsumed {
+                    if preciseGestureLocked {
                         return nil
                     }
                 }
 
-                let minimumInterval: TimeInterval = event.hasPreciseScrollingDeltas ? 0.12 : 0.18
+                if now - lastEventTime > 0.3 {
+                    resetAccumulation(lockPrecise: false)
+                }
+                lastEventTime = now
+
+                let minimumInterval: TimeInterval = event.hasPreciseScrollingDeltas ? 0.1 : 0.12
                 if now - lastTriggerTime < minimumInterval {
                     return event
                 }
 
-                let deltaX = event.scrollingDeltaX
-                let deltaY = event.scrollingDeltaY
-                let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 2.5 : 1.0
-
-                if abs(deltaY) >= abs(deltaX), abs(deltaY) >= threshold {
-                    lastTriggerTime = now
-                    if event.hasPreciseScrollingDeltas {
-                        preciseGestureConsumed = true
-                    }
-                    deltaY > 0 ? onNextPage() : onPreviousPage()
-                    return nil
+                guard dominantDelta != 0 else {
+                    return event
                 }
 
-                if abs(deltaX) >= threshold {
-                    lastTriggerTime = now
-                    if event.hasPreciseScrollingDeltas {
-                        preciseGestureConsumed = true
-                    }
-                    deltaX > 0 ? onNextPage() : onPreviousPage()
-                    return nil
+                if accumulatedDirection == 0 || dominantDelta.sign != accumulatedDirection.sign {
+                    accumulatedDelta = 0
+                }
+                accumulatedDirection = dominantDelta
+                accumulatedDelta += dominantDelta
+
+                let threshold: CGFloat = event.hasPreciseScrollingDeltas ? 4.5 : 0.95
+                guard abs(accumulatedDelta) >= threshold else {
+                    return event
                 }
 
-                return event
+                lastTriggerTime = now
+                if event.hasPreciseScrollingDeltas {
+                    preciseGestureLocked = true
+                }
+                triggerPageChange(with: accumulatedDelta)
+                accumulatedDelta = 0
+
+                return nil
             }
             isInstalled = true
+        }
+
+        private func triggerPageChange(with dominantDelta: CGFloat) {
+            // Match mouse wheel intuition: scroll up -> previous page, scroll down -> next page.
+            if dominantDelta > 0 {
+                onPreviousPage()
+            } else {
+                onNextPage()
+            }
+        }
+
+        private func resetAccumulation(lockPrecise: Bool) {
+            accumulatedDelta = 0
+            accumulatedDirection = 0
+            preciseGestureLocked = lockPrecise
         }
 
         func uninstall() {
