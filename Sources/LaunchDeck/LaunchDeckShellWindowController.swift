@@ -3,6 +3,9 @@ import SwiftUI
 
 final class LaunchDeckShellWindowController: NSWindowController {
     private let displayTarget: LaunchDeckDisplayTarget
+    private let openScale: CGFloat = 1.08
+    private let openDuration: TimeInterval = 0.34
+    private let closeDuration: TimeInterval = 0.28
 
     init(store: LaunchDeckShellStore, displayTarget: LaunchDeckDisplayTarget) {
         self.displayTarget = displayTarget
@@ -50,39 +53,98 @@ final class LaunchDeckShellWindowController: NSWindowController {
     }
 
     private func animateIn(window: NSWindow) {
+        let finalFrame = displayTarget.resolve()?.frame ?? window.frame
+        window.setFrame(finalFrame, display: true)
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        let finalFrame = displayTarget.resolve()?.frame ?? window.frame
-        let startFrame = finalFrame.insetBy(dx: finalFrame.width * 0.018, dy: finalFrame.height * 0.028)
-        window.setFrame(startFrame, display: true)
-        window.contentView?.alphaValue = 1
+        guard let contentView = window.contentView else {
+            window.alphaValue = 1
+            return
+        }
+        prepareAnimationLayer(for: contentView)
+        contentView.alphaValue = 0
+        contentView.layer?.transform = CATransform3DMakeScale(openScale, openScale, 1)
+        animateContentScale(
+            for: contentView,
+            from: openScale,
+            to: 1,
+            duration: openDuration,
+            timingFunction: CAMediaTimingFunction(name: .easeOut),
+            key: "launchdeck.window.open.scale"
+        )
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.22
+            context.duration = openDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
-            window.animator().setFrame(finalFrame, display: true)
+            contentView.animator().alphaValue = 1
         }
     }
 
     private func animateOut(window: NSWindow) {
-        let currentFrame = window.frame
-        let targetFrame = currentFrame.insetBy(dx: currentFrame.width * 0.015, dy: currentFrame.height * 0.022)
+        let contentView = window.contentView
+        if let contentView {
+            prepareAnimationLayer(for: contentView)
+            contentView.alphaValue = 1
+            animateContentScale(
+                for: contentView,
+                from: 1,
+                to: openScale,
+                duration: closeDuration,
+                timingFunction: CAMediaTimingFunction(name: .easeIn),
+                key: "launchdeck.window.close.scale"
+            )
+        }
 
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.16
+            context.duration = closeDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             window.animator().alphaValue = 0
-            window.animator().setFrame(targetFrame, display: true)
+            contentView?.animator().alphaValue = 0
         }, completionHandler: {
             Task { @MainActor in
                 window.orderOut(nil)
                 window.alphaValue = 1
-                window.setFrame(currentFrame, display: true)
+                contentView?.alphaValue = 1
+                contentView?.layer?.removeAllAnimations()
+                contentView?.layer?.transform = CATransform3DIdentity
             }
         })
+    }
+
+    private func prepareAnimationLayer(for contentView: NSView) {
+        contentView.wantsLayer = true
+        contentView.layoutSubtreeIfNeeded()
+        guard let layer = contentView.layer else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.removeAllAnimations()
+        layer.transform = CATransform3DIdentity
+        let frame = layer.frame
+        layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        layer.frame = frame
+        CATransaction.commit()
+    }
+
+    private func animateContentScale(
+        for contentView: NSView,
+        from: CGFloat,
+        to: CGFloat,
+        duration: TimeInterval,
+        timingFunction: CAMediaTimingFunction,
+        key: String
+    ) {
+        guard let layer = contentView.layer else { return }
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = CATransform3DMakeScale(from, from, 1)
+        animation.toValue = CATransform3DMakeScale(to, to, 1)
+        animation.duration = duration
+        animation.timingFunction = timingFunction
+        layer.add(animation, forKey: key)
+        layer.transform = CATransform3DMakeScale(to, to, 1)
     }
 }
 

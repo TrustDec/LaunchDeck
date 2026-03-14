@@ -17,6 +17,8 @@ struct LaunchDeckShellView: View {
 
     private let horizontalInset: CGFloat = 20
     private let verticalChromeAllowance: CGFloat = 220
+    private var isFolderMode: Bool { activeFolder != nil }
+    private var isFolderPresented: Bool { activeFolder != nil && isFolderOverlayVisible }
 
     var body: some View {
         GeometryReader { proxy in
@@ -41,6 +43,9 @@ struct LaunchDeckShellView: View {
                 }
                 .padding(.horizontal, horizontalInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .scaleEffect(isFolderPresented ? 1.08 : 1)
+                .opacity(isFolderPresented ? 0 : 1)
+                .allowsHitTesting(!isFolderMode)
 
                 SearchCommandMonitor(
                     isEnabled: store.isSearching,
@@ -73,7 +78,7 @@ struct LaunchDeckShellView: View {
                 .allowsHitTesting(false)
 
                 if let folder = activeFolder {
-                    folderOverlay(for: folder)
+                    folderOverlay(for: folder, in: proxy.size)
                 }
             }
             .task {
@@ -427,81 +432,120 @@ struct LaunchDeckShellView: View {
         .padding(.top, 8)
     }
 
-    private func folderOverlay(for folder: LaunchItem) -> some View {
-        ZStack {
+    private func folderOverlay(for folder: LaunchItem, in viewport: CGSize) -> some View {
+        VStack(spacing: 18) {
+            Text(folder.title)
+                .font(.system(size: 34, weight: .regular))
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.32 : 0.14), radius: 8, y: 4)
+
+            folderPanel(for: folder, in: viewport)
+                .onTapGesture { }
+        }
+        .scaleEffect(isFolderOverlayVisible ? 1 : 1.08)
+        .opacity(isFolderOverlayVisible ? 1 : 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .background {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture {
                     store.closeFolder()
                 }
-
-            folderPanel(for: folder)
-                .scaleEffect(isFolderOverlayVisible ? 1 : 1.018)
-                .opacity(isFolderOverlayVisible ? 1 : 0)
-                .onTapGesture { }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func folderPanel(for folder: LaunchItem) -> some View {
+    private func folderPanel(for folder: LaunchItem, in viewport: CGSize) -> some View {
         let resolvedFolder = store.items.first(where: { $0.id == folder.id && $0.isFolder }) ?? folder
         let itemCount = max(resolvedFolder.children.count, 1)
-        let folderMetrics = ShellLayoutMetrics.compact
-        let targetRows = 3
-        let columns = min(max(Int(ceil(Double(itemCount) / Double(targetRows))), 1), 7)
-        let rows = max(Int(ceil(Double(itemCount) / Double(columns))), 1)
-        let tileSize = folderMetrics.labelWidth
-        let spacingX: CGFloat = 22
-        let spacingY: CGFloat = 24
-        let gridColumns = Array(repeating: GridItem(.fixed(tileSize), spacing: spacingX), count: columns)
-        let gridWidth = CGFloat(columns) * tileSize + CGFloat(max(columns - 1, 0)) * spacingX
-        let gridHeight = CGFloat(rows) * folderMetrics.cellHeight + CGFloat(max(rows - 1, 0)) * spacingY
-        let panelWidth = min(max(gridWidth + 72, 640), 1080)
-        let panelHeight = min(max(gridHeight + 152, 420), 720)
+        let folderMetrics = metrics
+        let tileSize: CGFloat = folderMetrics.labelWidth
+        let spacingX: CGFloat = folderMetrics.columnSpacing
+        let spacingY: CGFloat = max(folderMetrics.rowSpacing - 8, 16)
+        let horizontalPadding: CGFloat = 34
+        let verticalPadding: CGFloat = 28
+        let maxPanelHeight = max(viewport.height - 220, 320)
+        let fixedColumns = max(pageColumns, 1)
+        let rows = max(Int(ceil(Double(itemCount) / Double(fixedColumns))), 1)
+        let gridWidth = CGFloat(fixedColumns) * tileSize + CGFloat(max(fixedColumns - 1, 0)) * spacingX
+        let gridHeight = CGFloat(rows) * folderMetrics.cellHeight + CGFloat(max(rows - 1, 0)) * spacingY + 2
+        let panelWidth = min(gridWidth + horizontalPadding * 2, max(viewport.width - 40, 360))
+        let panelHeight = min(max(gridHeight + verticalPadding * 2, 260), maxPanelHeight)
+        let chunkedRows = resolvedFolder.children.chunked(into: fixedColumns)
 
-        return VStack(alignment: .leading, spacing: 20) {
-            Text(resolvedFolder.title)
-                .font(.system(size: 34, weight: .medium))
-                .frame(maxWidth: .infinity, alignment: .center)
+        return VStack(spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: spacingY) {
+                    ForEach(Array(chunkedRows.enumerated()), id: \.offset) { _, rowItems in
+                        let emptyCount = max(fixedColumns - rowItems.count, 0)
+                        let leadingSpacers = emptyCount / 2
+                        let trailingSpacers = emptyCount - leadingSpacers
 
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVGrid(columns: gridColumns, spacing: spacingY) {
-                    ForEach(resolvedFolder.children) { child in
-                        Button {
-                            store.closeFolder()
-                            store.activate(child)
-                        } label: {
-                            VStack(spacing: 10) {
-                                ShellIconTile(item: child, isActive: false, metrics: folderMetrics)
-                                Text(child.title)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(Color(nsColor: .labelColor))
-                                    .lineLimit(1)
-                                    .frame(width: tileSize)
+                        HStack(alignment: .top, spacing: spacingX) {
+                            ForEach(0..<leadingSpacers, id: \.self) { _ in
+                                Color.clear
+                                    .frame(width: tileSize, height: folderMetrics.cellHeight)
+                            }
+
+                            ForEach(rowItems) { child in
+                                Button {
+                                    store.closeFolder()
+                                    store.activate(child)
+                                } label: {
+                                    VStack(spacing: 10) {
+                                        ShellIconTile(item: child, isActive: false, metrics: folderMetrics)
+                                        Text(child.title)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(Color(nsColor: .labelColor))
+                                            .lineLimit(1)
+                                            .frame(width: tileSize)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            ForEach(0..<trailingSpacers, id: \.self) { _ in
+                                Color.clear
+                                    .frame(width: tileSize, height: folderMetrics.cellHeight)
                             }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, verticalPadding)
+                .frame(width: gridWidth + horizontalPadding * 2, alignment: .center)
             }
         }
-        .padding(28)
         .frame(width: panelWidth, height: panelHeight, alignment: .topLeading)
         .background {
-            SystemGlassSurface(cornerRadius: 28, style: .regular)
+            SystemGlassSurface(cornerRadius: 36, style: .regular)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.2), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.13 : 0.18),
+                            Color.clear,
+                            Color.black.opacity(colorScheme == .dark ? 0.16 : 0.08),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .blendMode(.overlay)
+                .allowsHitTesting(false)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 36, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.14 : 0.23), lineWidth: 1)
         }
     }
 
     private func syncFolderOverlay(with nextFolder: LaunchItem?) {
         if let nextFolder {
             activeFolder = nextFolder
-            withAnimation(.easeOut(duration: 0.22)) {
+            withAnimation(.easeOut(duration: 0.34)) {
                 isFolderOverlayVisible = true
             }
             return
@@ -511,10 +555,10 @@ struct LaunchDeckShellView: View {
             return
         }
 
-        withAnimation(.easeIn(duration: 0.16)) {
+        withAnimation(.easeIn(duration: 0.28)) {
             isFolderOverlayVisible = false
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
             if store.selectedFolder == nil {
                 activeFolder = nil
             }
